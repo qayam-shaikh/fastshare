@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A temporary, token-protected Ubuntu-to-Android QuickShare web app."""
+"""QuickShare LAN — A two-way, token-protected Ubuntu-to-Mobile file & text sharing web app."""
 from __future__ import annotations
 
 import argparse
@@ -7,6 +7,7 @@ import base64
 import cgi
 import html
 import ipaddress
+import json
 import mimetypes
 import secrets
 import shutil
@@ -19,6 +20,7 @@ import time
 import urllib.parse
 import webbrowser
 import zipfile
+from dataclasses import dataclass, field
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,6 +28,22 @@ from io import BytesIO
 from pathlib import Path
 
 MIB = 1024 * 1024
+MAX_CLIPBOARD_CHARS = 2000
+
+IMAGE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".avif", ".ico", ".jfif", ".tif", ".tiff"
+}
+ZIP_EXTENSIONS = {".zip"}
+
+
+def format_size(num_bytes: int) -> str:
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    if num_bytes < MIB:
+        return f"{num_bytes / 1024:.1f} KB"
+    if num_bytes < 1024 * MIB:
+        return f"{num_bytes / MIB:.1f} MB"
+    return f"{num_bytes / (1024 * MIB):.2f} GB"
 
 
 def private_ipv4_addresses() -> list[str]:
@@ -38,23 +56,34 @@ def private_ipv4_addresses() -> list[str]:
     except OSError:
         pass
     try:
-        found.update(item[4][0] for item in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET))
+        found.update(
+            item[4][0]
+            for item in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+        )
     except socket.gaierror:
         pass
-    usable = {ip for ip in found | set(preferred) if ipaddress.ip_address(ip).is_private and not ip.startswith("127.")}
-    # Keep the default-route address first. Sorting alone can wrongly select a
-    # Docker/virtual-machine network that an Android phone cannot reach.
+    usable = {
+        ip
+        for ip in found | set(preferred)
+        if ipaddress.ip_address(ip).is_private and not ip.startswith("127.")
+    }
     return [ip for ip in preferred if ip in usable] + sorted(usable - set(preferred))
 
 
 def safe_name(name: str, fallback: str = "upload") -> str:
     name = Path(name).name.replace("\x00", "").strip()
-    name = "".join(char if char.isalnum() or char in " ._-()[]" else "_" for char in name).strip(" .")
+    name = "".join(
+        char if char.isalnum() or char in " ._-()[]" else "_" for char in name
+    ).strip(" .")
     return (name or fallback)[:180]
 
 
 def safe_relative_path(name: str) -> Path:
-    parts = [safe_name(part) for part in name.replace("\\", "/").split("/") if part not in ("", ".", "..")]
+    parts = [
+        safe_name(part)
+        for part in name.replace("\\", "/").split("/")
+        if part not in ("", ".", "..")
+    ]
     return Path(*parts) if parts else Path("upload")
 
 
@@ -69,86 +98,301 @@ def unique_path(directory: Path, filename: str) -> Path:
 
 
 def clipboard_text() -> str | None:
-    for command in (("wl-paste", "--no-newline"), ("xclip", "-selection", "clipboard", "-o"), ("xsel", "--clipboard", "--output")):
+    for command in (
+        ("wl-paste", "--no-newline"),
+        ("xclip", "-selection", "clipboard", "-o"),
+        ("xsel", "--clipboard", "--output"),
+    ):
         try:
-            return subprocess.run(command, capture_output=True, text=True, timeout=3, check=True).stdout
+            return subprocess.run(
+                command, capture_output=True, text=True, timeout=3, check=True
+            ).stdout
         except (FileNotFoundError, subprocess.SubprocessError):
             pass
     return None
 
 
+def classify_file_kind(filename: str) -> str:
+    ext = Path(filename).suffix.lower()
+    if ext in ZIP_EXTENSIONS:
+        return "zip"
+    if ext in IMAGE_EXTENSIONS:
+        return "image"
+    guessed, _ = mimetypes.guess_type(filename)
+    if guessed:
+        if guessed in ("application/zip", "application/x-zip-compressed"):
+            return "zip"
+        if guessed.startswith("image/"):
+            return "image"
+    return "file"
+
+
+@dataclass
+class TransferItem:
+    id: str
+    sender: str  # "laptop" or "phone"
+    kind: str  # "text", "image", "zip", "file"
+    name: str
+    path: Path
+    size: int
+    mime: str
+    created_at: str = field(default_factory=lambda: datetime.now().strftime("%I:%M:%S %p"))
+    text_content: str = ""
+    text_too_long: bool = False
+    is_folder_zip: bool = False
+
+    def to_dict(self, base_url: str) -> dict:
+        return {
+            "id": self.id,
+            "sender": self.sender,
+            "kind": self.kind,
+            "name": self.name,
+            "size": self.size,
+            "size_human": format_size(self.size),
+            "mime": self.mime,
+            "created_at": self.created_at,
+            "text_content": self.text_content,
+            "text_too_long": self.text_too_long,
+            "is_folder_zip": self.is_folder_zip,
+            "download_url": f"{base_url}/download/{self.id}",
+            "preview_url": f"{base_url}/preview/{self.id}" if self.kind == "image" else "",
+        }
+
+
 class ShareState:
     def __init__(self, args: argparse.Namespace, bind_ip: str, work: Path):
-        self.admin_token = secrets.token_urlsafe(32)
-        self.phone_token: str | None = None
+        use_random = getattr(args, "random_token", False)
+        self.admin_token = secrets.token_urlsafe(16) if use_random else ""
+        # Fixed URL path by default so the phone URL stays identical across launches
+        self.phone_token: str = secrets.token_urlsafe(16) if use_random else "" 
         self.bind_ip = bind_ip
         self.started = time.monotonic()
         self.minutes = args.minutes
         self.max_upload = args.max_upload_mib * MIB
         self.work = work
-        self.selection_dir = work / "selected"
-        self.selection_dir.mkdir(parents=True)
-        self.inbox = Path(args.inbox).expanduser() / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        self.inbox.mkdir(parents=True, exist_ok=True)
+        self.storage_dir = work / "transfers"
+        self.storage_dir.mkdir(parents=True, exist_ok=True)
+        self.save_inbox = getattr(args, "save_inbox", False)
+        self.inbox = (
+            Path(args.inbox).expanduser() / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        )
+        if self.save_inbox:
+            self.inbox.mkdir(parents=True, exist_ok=True)
+
+        self.items: list[TransferItem] = []
+        self._counter = 0
+        self.screen = "home"  # "home" or "workspace"
+        self.initial_focus = "send"  # "send" or "receive"
+        self.phone_connected = False
+        self.last_phone_seen: float = 0.0
+        self.lock = threading.Lock()
+
+        # Retained for backwards compatibility
         self.downloads: list[Path] = []
         self.received: list[str] = []
         self.selection_label = ""
-        self.mode: str | None = None
-        self.screen = "home"
-        self.lock = threading.Lock()
+        self.mode: str | None = "both"
 
     def expired(self) -> bool:
         return self.minutes > 0 and time.monotonic() - self.started > self.minutes * 60
 
-    def start_phone_session(self, mode: str) -> None:
+    def remaining_seconds(self) -> int:
+        if self.minutes <= 0:
+            return -1
+        rem = int(self.minutes * 60 - (time.monotonic() - self.started))
+        return max(0, rem)
+
+    def mark_phone_seen(self) -> None:
+        with self.lock:
+            self.phone_connected = True
+            self.last_phone_seen = time.monotonic()
+            # Automatically transition laptop to active workspace once phone scans QR
+            if self.screen == "home":
+                self.screen = "workspace"
+
+    def start_phone_session(self, mode: str = "both") -> None:
         with self.lock:
             self.mode = mode
-            self.phone_token = secrets.token_urlsafe(32)
+            self.screen = "workspace"
+            self.initial_focus = "receive" if mode == "receive" else "send" 
 
-    def clear_selection(self) -> None:
-        self.downloads.clear()
-        self.selection_label = ""
-        shutil.rmtree(self.selection_dir, ignore_errors=True)
-        self.selection_dir.mkdir()
+    def _next_id(self) -> str:
+        self._counter += 1
+        return f"item_{self._counter}_{secrets.token_hex(3)}"
 
-    def add_clipboard(self) -> None:
+    def get_item(self, item_id: str) -> TransferItem | None:
+        with self.lock:
+            for item in self.items:
+                if item.id == item_id and item.path.exists():
+                    return item
+        return None
+
+    def delete_item(self, item_id: str) -> bool:
+        with self.lock:
+            for idx, item in enumerate(self.items):
+                if item.id == item_id:
+                    try:
+                        item.path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    self.items.pop(idx)
+                    return True
+        return False
+
+    def add_text_item(self, sender: str, text: str, label: str = "text-snippet.txt") -> TransferItem:
+        cleaned = text.replace("\r\n", "\n")
+        if not cleaned.strip():
+            raise ValueError("Enter or copy some non-empty text first.")
+        with self.lock:
+            item_id = self._next_id()
+            target = unique_path(self.storage_dir, safe_name(label, "text.txt"))
+            if not target.name.lower().endswith(".txt"):
+                target = target.with_name(target.name + ".txt")
+            target.write_text(cleaned, encoding="utf-8")
+            if sender == "phone" and self.save_inbox:
+                self.inbox.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(target, unique_path(self.inbox, target.name))
+
+            size = target.stat().st_size
+            too_long = len(cleaned) > MAX_CLIPBOARD_CHARS
+            preview = cleaned[:600] + ("…" if len(cleaned) > 600 else "") if too_long else cleaned
+
+            item = TransferItem(
+                id=item_id,
+                sender=sender,
+                kind="text",
+                name=target.name,
+                path=target,
+                size=size,
+                mime="text/plain; charset=utf-8",
+                text_content=preview,
+                text_too_long=too_long,
+            )
+            self.items.append(item)
+            if sender == "laptop":
+                self.downloads.append(target)
+                self.selection_label = "Text snippet"
+                self.screen = "workspace"
+            else:
+                self.received.append(f"Text: {cleaned[:200]}")
+            return item
+
+    def add_clipboard(self) -> TransferItem:
         text = clipboard_text()
-        if text is None:
-            raise ValueError("Clipboard access is unavailable. Install wl-clipboard, xclip, or xsel.")
-        target = self.selection_dir / "clipboard.txt"
-        target.write_text(text, encoding="utf-8")
-        self.downloads = [target]
-        self.selection_label = "Clipboard text"
+        if text is None or not text.strip():
+            raise ValueError(
+                "System clipboard is empty or unavailable. You can paste directly into the Text box instead, or install wl-clipboard / xclip / xsel."
+            )
+        return self.add_text_item("laptop", text, "clipboard.txt")
 
-    def save_uploads(self, form: cgi.FieldStorage, field: str, *, folder: bool = False) -> None:
-        items = form[field] if field in form else []
-        if not isinstance(items, list):
-            items = [items]
-        target_dir = self.selection_dir / ("folder" if folder else "files")
-        target_dir.mkdir(parents=True, exist_ok=True)
-        saved = 0
-        for item in items:
-            if not getattr(item, "filename", None):
-                continue
-            target = target_dir / safe_relative_path(item.filename) if folder else unique_path(target_dir, item.filename)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with target.open("xb") as dest:
-                while chunk := item.file.read(1024 * 1024):
-                    dest.write(chunk)
-            saved += 1
-        if not saved:
-            raise ValueError("Choose at least one item first.")
+    def save_uploaded_items(
+        self,
+        sender: str,
+        form: cgi.FieldStorage,
+        field_name: str,
+        *,
+        folder: bool = False,
+    ) -> list[TransferItem]:
+        raw_items = form[field_name] if field_name in form else []
+        if not isinstance(raw_items, list):
+            raw_items = [raw_items]
+
+        valid_items = [it for it in raw_items if getattr(it, "filename", None)]
+        if not valid_items:
+            raise ValueError("Choose at least one file or folder first.")
+
+        created: list[TransferItem] = []
+
         if folder:
-            archive = self.selection_dir / "folder.zip"
-            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                for file in target_dir.rglob("*"):
-                    if file.is_file():
-                        zip_file.write(file, file.relative_to(target_dir))
-            self.downloads = [archive]
-            self.selection_label = "Folder (ZIP)"
-        else:
-            self.downloads = [path for path in target_dir.rglob("*") if path.is_file()]
-            self.selection_label = f"{saved} selected item{'s' if saved != 1 else ''}"
+            with self.lock:
+                batch_dir = self.storage_dir / f"folder_build_{ self._next_id() }"
+            batch_dir.mkdir(parents=True, exist_ok=True)
+            top_folder_name = "folder"
+            saved_count = 0
+
+            for item in valid_items:
+                rel_path = safe_relative_path(item.filename)
+                if len(rel_path.parts) > 1 and top_folder_name == "folder":
+                    top_folder_name = rel_path.parts[0]
+                target = batch_dir / rel_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("wb") as dest:
+                    while chunk := item.file.read(MIB):
+                        dest.write(chunk)
+                saved_count += 1
+
+            if saved_count == 0:
+                shutil.rmtree(batch_dir, ignore_errors=True)
+                raise ValueError("Selected folder was empty.")
+
+            zip_filename = f"{safe_name(top_folder_name, 'folder')}.zip"
+            with self.lock:
+                archive_path = unique_path(self.storage_dir, zip_filename)
+                with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for fpath in batch_dir.rglob("*"):
+                        if fpath.is_file():
+                            zf.write(fpath, fpath.relative_to(batch_dir))
+                shutil.rmtree(batch_dir, ignore_errors=True)
+
+                if sender == "phone" and self.save_inbox:
+                    self.inbox.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(archive_path, unique_path(self.inbox, archive_path.name))
+
+                item_id = self._next_id()
+                transfer = TransferItem(
+                    id=item_id,
+                    sender=sender,
+                    kind="zip",
+                    name=archive_path.name,
+                    path=archive_path,
+                    size=archive_path.stat().st_size,
+                    mime="application/zip",
+                    is_folder_zip=True,
+                )
+                self.items.append(transfer)
+                created.append(transfer)
+                if sender == "laptop":
+                    self.downloads.append(archive_path)
+                    self.selection_label = f"Folder ({archive_path.name})"
+                    self.screen = "workspace"
+                else:
+                    self.received.append(f"ZIP: {archive_path.name}")
+            return created
+
+        # Standard files or images
+        for item in valid_items:
+            raw_name = item.filename or "upload"
+            with self.lock:
+                target = unique_path(self.storage_dir, raw_name)
+                with target.open("wb") as dest:
+                    while chunk := item.file.read(MIB):
+                        dest.write(chunk)
+
+                if sender == "phone" and self.save_inbox:
+                    self.inbox.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(target, unique_path(self.inbox, target.name))
+
+                kind = classify_file_kind(target.name)
+                mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+                item_id = self._next_id()
+                transfer = TransferItem(
+                    id=item_id,
+                    sender=sender,
+                    kind=kind,
+                    name=target.name,
+                    path=target,
+                    size=target.stat().st_size,
+                    mime=mime,
+                )
+                self.items.append(transfer)
+                created.append(transfer)
+                if sender == "laptop":
+                    self.downloads.append(target)
+                    self.selection_label = f"{len(created)} item(s)"
+                    self.screen = "workspace"
+                else:
+                    self.received.append(f"File: {target.name}")
+        return created
 
 
 class QuickShareServer(ThreadingHTTPServer):
@@ -165,41 +409,62 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args) -> None:
-        print(f"[{self.log_date_time_string()}] {self.client_address[0]} {fmt % args}")
-
-    def is_private_client(self) -> bool:
-        try:
-            return ipaddress.ip_address(self.client_address[0]).is_private
-        except ValueError:
-            return False
+        # Suppress noisy background state poll logs while keeping actual actions visible
+        msg = fmt % args
+        if "/api/state" in msg:
+            return
+        print(f"[{self.log_date_time_string()}] {self.client_address[0]} {msg}")
 
     def is_laptop(self) -> bool:
-        return self.client_address[0] == self.server.state.bind_ip or self.client_address[0] in ("127.0.0.1", "::1")
+        return self.client_address[0] == self.server.state.bind_ip or self.client_address[0] in (
+            "127.0.0.1",
+            "::1",
+        )
 
     def admin_path(self) -> str:
-        return f"/app/{self.server.state.admin_token}"
+        tok = self.server.state.admin_token
+        return f"/app/{tok}" if tok else "/app"
 
     def phone_path(self) -> str:
-        return f"/share/{self.server.state.phone_token or ''}"
+        tok = self.server.state.phone_token
+        return f"/share/{tok}" if tok else "/share"
 
     def is_admin(self, path: str) -> bool:
-        return self.is_laptop() and (path == self.admin_path() or path.startswith(self.admin_path() + "/"))
+        return self.is_laptop() and (
+            path == self.admin_path() or path.startswith(self.admin_path() + "/")
+        )
 
     def is_phone(self, path: str) -> bool:
-        # The server itself binds only to the chosen private LAN address. Some
-        # Wi-Fi/router setups present a phone with an address Python does not
-        # classify as private, so access is controlled by the unguessable
-        # per-session QR token rather than client-address classification.
-        return self.server.state.phone_token is not None and (path == self.phone_path() or path.startswith(self.phone_path() + "/"))
+        return self.server.state.phone_token is not None and (
+            path == self.phone_path() or path.startswith(self.phone_path() + "/")
+        )
 
-    def send_text(self, text: str, status: HTTPStatus = HTTPStatus.OK, content_type: str = "text/plain; charset=utf-8") -> None:
+    def wants_json(self) -> bool:
+        accept = self.headers.get("Accept", "")
+        xhr = self.headers.get("X-Requested-With", "")
+        return "application/json" in accept or xhr == "XMLHttpRequest"
+
+    def send_text(
+        self,
+        text: str,
+        status: HTTPStatus = HTTPStatus.OK,
+        content_type: str = "text/plain; charset=utf-8",
+    ) -> None:
         body = text.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers(); self.wfile.write(body)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
+        self.send_text(
+            json.dumps(payload, ensure_ascii=False),
+            status=status,
+            content_type="application/json; charset=utf-8",
+        )
 
     def send_html(self, text: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         self.send_text(text, status, "text/html; charset=utf-8")
@@ -211,185 +476,462 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
-    def deny(self, status: HTTPStatus = HTTPStatus.NOT_FOUND, message: str = "Not found") -> None:
-        self.send_text(message, status)
+    def deny(
+        self, status: HTTPStatus = HTTPStatus.NOT_FOUND, message: str = "Not found"
+    ) -> None:
+        if self.wants_json():
+            self.send_json({"ok": False, "error": message}, status=status)
+        else:
+            self.send_text(message, status)
 
     def do_GET(self) -> None:
         state = self.server.state
-        if state.expired(): return self.deny(HTTPStatus.GONE, "This QuickShare session has expired.")
+        if state.expired():
+            return self.deny(HTTPStatus.GONE, "This QuickShare session has expired.")
         path = urllib.parse.urlsplit(self.path).path
-        if self.is_admin(path): return self.send_html(self.admin_page())
+        while "//" in path:
+            path = path.replace("//", "/")
+
+        if path.startswith("/static/"):
+            return self.serve_static_asset(path[len("/static/"):])
+
+        if path.startswith("/static/"):
+            return self.serve_static_asset(path[len("/static/"):])
+
+        if path in ("", "/"):
+            return self.redirect(self.admin_path() if self.is_laptop() else self.phone_path())
+
+        if self.is_admin(path):
+            suffix = path[len(self.admin_path()) :]
+            if suffix in ("", "/"):
+                return self.send_html(self.render_app_page(role="laptop"))
+            if suffix == "/api/state":
+                return self.handle_api_state(role="laptop")
+            if suffix.startswith("/download/"):
+                return self.serve_item_file(suffix.rsplit("/", 1)[1], inline=False)
+            if suffix.startswith("/preview/"):
+                return self.serve_item_file(suffix.rsplit("/", 1)[1], inline=True)
+            return self.deny()
+
         if self.is_phone(path):
-            suffix = path[len(self.phone_path()):]
-            if suffix.startswith("/download/"): return self.download(suffix.rsplit("/", 1)[1])
-            if suffix in ("", "/"): return self.send_html(self.phone_page())
+            state.mark_phone_seen()
+            suffix = path[len(self.phone_path()) :]
+            if suffix in ("", "/"):
+                return self.send_html(self.render_app_page(role="phone"))
+            if suffix == "/api/state":
+                return self.handle_api_state(role="phone")
+            if suffix.startswith("/download/"):
+                return self.serve_item_file(suffix.rsplit("/", 1)[1], inline=False)
+            if suffix.startswith("/preview/"):
+                return self.serve_item_file(suffix.rsplit("/", 1)[1], inline=True)
+            return self.deny()
+
         return self.deny()
 
     def do_POST(self) -> None:
         state = self.server.state
-        if state.expired(): return self.deny(HTTPStatus.GONE, "This QuickShare session has expired.")
+        if state.expired():
+            return self.deny(HTTPStatus.GONE, "This QuickShare session has expired.")
         path = urllib.parse.urlsplit(self.path).path
-        if self.is_admin(path): return self.handle_admin_post(path[len(self.admin_path()):])
-        if self.is_phone(path) and path == self.phone_path() + "/upload":
-            if state.mode != "receive": return self.deny()
-            return self.receive_from_phone()
+        while "//" in path:
+            path = path.replace("//", "/")
+
+        if self.is_admin(path):
+            return self.handle_admin_post(path[len(self.admin_path()) :])
+
+        if self.is_phone(path):
+            state.mark_phone_seen()
+            suffix = path[len(self.phone_path()) :]
+            if suffix in ("/upload", "/files", "/images", "/folder", "/text"):
+                return self.handle_upload_post(sender="phone", suffix=suffix)
+            if suffix.startswith("/delete/"):
+                item_id = suffix.rsplit("/", 1)[1]
+                state.delete_item(item_id)
+                return self.send_json({"ok": True})
+
         return self.deny()
 
     def parse_form(self) -> cgi.FieldStorage | None:
-        try: length = int(self.headers.get("Content-Length", "0"))
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
-            self.deny(HTTPStatus.BAD_REQUEST, "Invalid request length"); return None
+            self.deny(HTTPStatus.BAD_REQUEST, "Invalid request length.")
+            return None
         if length <= 0 or length > self.server.state.max_upload:
-            self.deny(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "This request exceeds the upload limit."); return None
-        if self.headers.get_content_type() != "multipart/form-data":
-            self.deny(HTTPStatus.BAD_REQUEST, "Expected a form upload."); return None
-        environ = {"REQUEST_METHOD": "POST", "CONTENT_TYPE": self.headers["Content-Type"], "CONTENT_LENGTH": str(length)}
-        try: return cgi.FieldStorage(fp=self.rfile, headers=self.headers, environ=environ, keep_blank_values=True)
+            self.deny(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                f"Upload exceeds the {self.server.state.max_upload // MIB} MiB limit.",
+            )
+            return None
+        ctype = self.headers.get_content_type()
+        if ctype not in ("multipart/form-data", "application/x-www-form-urlencoded"):
+            self.deny(HTTPStatus.BAD_REQUEST, "Expected a form upload.")
+            return None
+        environ = {
+            "REQUEST_METHOD": "POST",
+            "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+            "CONTENT_LENGTH": str(length),
+        }
+        try:
+            return cgi.FieldStorage(
+                fp=self.rfile,
+                headers=self.headers,
+                environ=environ,
+                keep_blank_values=True,
+            )
         except Exception:
-            self.deny(HTTPStatus.BAD_REQUEST, "Could not read upload."); return None
+            self.deny(HTTPStatus.BAD_REQUEST, "Could not read upload data.")
+            return None
+
+    def handle_api_state(self, role: str) -> None:
+        state = self.server.state
+        base = self.admin_path() if role == "laptop" else self.phone_path()
+        with state.lock:
+            items_data = [item.to_dict(base) for item in reversed(state.items)]
+            payload = {
+                "ok": True,
+                "role": role,
+                "screen": state.screen,
+                "initial_focus": state.initial_focus,
+                "phone_connected": state.phone_connected,
+                "phone_url": self.phone_url(),
+                "remaining_seconds": state.remaining_seconds(),
+                "items": items_data,
+            }
+        self.send_json(payload)
 
     def handle_admin_post(self, suffix: str) -> None:
         state = self.server.state
-        if suffix == "/receive":
-            state.clear_selection(); state.start_phone_session("receive")
-            # Do not leave the browser on this POST URL: the live-activity
-            # refresh would resubmit it and invalidate the QR every 2 seconds.
+        if suffix in ("/receive", "/open-send", "/start"):
+            mode = "receive" if suffix == "/receive" else "send"
+            state.start_phone_session(mode)
+            if self.wants_json():
+                return self.send_json(
+                    {
+                        "ok": True,
+                        "screen": state.screen,
+                        "initial_focus": state.initial_focus,
+                    }
+                )
             return self.redirect(self.admin_path())
-        if suffix == "/open-send":
-            state.clear_selection(); state.phone_token = None; state.mode = None; state.screen = "send"
-            return self.send_html(self.admin_page())
+
         if suffix == "/home":
-            state.clear_selection(); state.phone_token = None; state.mode = None; state.screen = "home"
-            return self.send_html(self.admin_page())
+            with state.lock:
+                state.screen = "home"
+            if self.wants_json():
+                return self.send_json({"ok": True, "screen": "home"})
+            return self.redirect(self.admin_path())
+
         if suffix == "/clipboard":
-            try: state.clear_selection(); state.add_clipboard()
-            except ValueError as error: return self.send_html(self.admin_page(str(error)), HTTPStatus.BAD_REQUEST)
-            return self.send_html(self.admin_page())
-        if suffix in ("/images", "/files", "/folder"):
-            form = self.parse_form()
-            if form is None: return
             try:
-                state.clear_selection()
-                state.save_uploads(form, "items" if suffix != "/folder" else "folderitems", folder=suffix == "/folder")
-            except ValueError as error: return self.send_html(self.admin_page(str(error)), HTTPStatus.BAD_REQUEST)
-            return self.send_html(self.admin_page())
+                item = state.add_clipboard()
+            except ValueError as error:
+                if self.wants_json():
+                    return self.send_json(
+                        {"ok": False, "error": str(error)}, status=HTTPStatus.BAD_REQUEST
+                    )
+                return self.send_html(
+                    self.render_app_page(role="laptop", error=str(error)),
+                    HTTPStatus.BAD_REQUEST,
+                )
+            if self.wants_json():
+                return self.send_json(
+                    {"ok": True, "added": [item.to_dict(self.admin_path())]}
+                )
+            return self.redirect(self.admin_path())
+
+        if suffix in ("/upload", "/images", "/files", "/folder", "/text"):
+            return self.handle_upload_post(sender="laptop", suffix=suffix)
+
         if suffix == "/send":
-            if not state.downloads: return self.send_html(self.admin_page("Choose something to send first."), HTTPStatus.BAD_REQUEST)
             state.start_phone_session("send")
-            return self.send_html(self.admin_page())
+            if self.wants_json():
+                return self.send_json({"ok": True, "screen": "workspace"})
+            return self.redirect(self.admin_path())
+
+        if suffix.startswith("/delete/"):
+            item_id = suffix.rsplit("/", 1)[1]
+            state.delete_item(item_id)
+            return self.send_json({"ok": True})
+
         if suffix == "/stop":
-            self.send_html("<p>QuickShare stopped. You can close this tab.</p>")
-            threading.Thread(target=self.stop_later, daemon=True).start(); return
+            if self.wants_json():
+                self.send_json({"ok": True, "stopped": True})
+            else:
+                self.send_html(
+                    "<!doctype html><html><body style='font-family:system-ui;padding:40px;text-align:center'><h2>QuickShare session stopped</h2><p>You can safely close this tab.</p></body></html>"
+                )
+            threading.Thread(target=self.stop_later, daemon=True).start()
+            return
+
         return self.deny()
 
-    def stop_later(self) -> None:
-        time.sleep(.2); self.server.shutdown()
-
-    def receive_from_phone(self) -> None:
+    def handle_upload_post(self, sender: str, suffix: str) -> None:
         form = self.parse_form()
-        if form is None: return
-        state = self.server.state; saved: list[str] = []
-        text = form.getfirst("message", "").strip()
-        if text:
-            target = unique_path(state.inbox, "phone-text.txt")
-            target.write_text(text, encoding="utf-8"); saved.append(target.name)
-            state.received.append(f"Text: {text[:500]}")
-        items = form["files"] if "files" in form else []
-        if not isinstance(items, list): items = [items]
-        for item in items:
-            if not getattr(item, "filename", None): continue
-            target = unique_path(state.inbox, item.filename)
-            with target.open("xb") as dest:
-                while chunk := item.file.read(1024 * 1024): dest.write(chunk)
-            saved.append(target.name)
-            state.received.append(f"File: {target.name}")
-        message = "Nothing was selected." if not saved else "Received: " + ", ".join(html.escape(name) for name in saved)
-        self.send_html(f"<meta http-equiv='refresh' content='2;url={self.phone_path()}'> <p>{message}</p><p>Returning to QuickShare…</p>")
+        if form is None:
+            return
+        state = self.server.state
+        base = self.admin_path() if sender == "laptop" else self.phone_path()
+        added: list[TransferItem] = []
 
-    def download(self, raw_index: str) -> None:
-        if self.server.state.mode != "send": return self.deny()
-        try: file = self.server.state.downloads[int(raw_index)]
-        except (ValueError, IndexError): return self.deny()
         try:
-            size = file.stat().st_size
+            # 1. Check if text message was submitted
+            text_val = form.getfirst("message", "")
+            if text_val and text_val.strip():
+                label = "laptop-note.txt" if sender == "laptop" else "phone-note.txt"
+                added.append(state.add_text_item(sender, text_val, label))
+
+            # 2. Check if folder upload was submitted
+            is_folder = suffix == "/folder" or form.getfirst("is_folder", "") == "1"
+            if "folderitems" in form:
+                added.extend(
+                    state.save_uploaded_items(
+                        sender, form, "folderitems", folder=True
+                    )
+                )
+            elif "items" in form:
+                added.extend(
+                    state.save_uploaded_items(
+                        sender, form, "items", folder=is_folder
+                    )
+                )
+            elif "files" in form:
+                added.extend(
+                    state.save_uploaded_items(
+                        sender, form, "files", folder=is_folder
+                    )
+                )
+
+            if not added:
+                raise ValueError("Please select a file, folder, image, or enter text first.")
+
+        except ValueError as error:
+            if self.wants_json():
+                return self.send_json(
+                    {"ok": False, "error": str(error)}, status=HTTPStatus.BAD_REQUEST
+                )
+            return self.send_html(
+                self.render_app_page(role=sender, error=str(error)),
+                HTTPStatus.BAD_REQUEST,
+            )
+
+        if self.wants_json():
+            return self.send_json(
+                {
+                    "ok": True,
+                    "added": [it.to_dict(base) for it in added],
+                }
+            )
+        return self.redirect(base)
+
+    def stop_later(self) -> None:
+        time.sleep(0.25)
+        self.server.shutdown()
+
+    def serve_item_file(self, item_id: str, *, inline: bool = False) -> None:
+        item = self.server.state.get_item(item_id)
+        if item is None or not item.path.exists():
+            return self.deny(HTTPStatus.NOT_FOUND, "Item no longer available.")
+        try:
+            size = item.path.stat().st_size
             self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", mimetypes.guess_type(file.name)[0] or "application/octet-stream")
-            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{urllib.parse.quote(file.name)}")
-            self.send_header("Content-Length", str(size)); self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Type", item.mime)
+            disposition = "inline" if inline else "attachment"
+            encoded_name = urllib.parse.quote(item.name)
+            self.send_header(
+                "Content-Disposition",
+                f"{disposition}; filename*=UTF-8''{encoded_name}",
+            )
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            with file.open("rb") as source: shutil.copyfileobj(source, self.wfile)
-        except (OSError, BrokenPipeError): pass
+            with item.path.open("rb") as source:
+                shutil.copyfileobj(source, self.wfile)
+        except (OSError, BrokenPipeError):
+            pass
 
     def qr_data_uri(self) -> str:
+        vendor = Path(__file__).with_name(".quickshare_vendor")
+        if vendor.is_dir() and str(vendor) not in sys.path:
+            sys.path.append(str(vendor))
         try:
-            vendor = Path(__file__).with_name(".quickshare_vendor")
-            if vendor.is_dir(): sys.path.insert(0, str(vendor))
             import qrcode
+
             image = qrcode.make(self.phone_url())
-            output = BytesIO(); image.save(output, format="PNG")
-            return "data:image/png;base64," + base64.b64encode(output.getvalue()).decode("ascii")
-        except ImportError: return ""
+            output = BytesIO()
+            image.save(output, format="PNG")
+            return "data:image/png;base64," + base64.b64encode(
+                output.getvalue()
+            ).decode("ascii")
+        except Exception:
+            try:
+                import qrcode
+                import qrcode.image.svg
+
+                image = qrcode.make(
+                    self.phone_url(),
+                    image_factory=qrcode.image.svg.SvgPathImage,
+                )
+                output = BytesIO()
+                image.save(output)
+                return "data:image/svg+xml;base64," + base64.b64encode(
+                    output.getvalue()
+                ).decode("ascii")
+            except Exception:
+                return ""
 
     def phone_url(self) -> str:
         return f"http://{self.server.state.bind_ip}:{self.server.server_port}{self.phone_path()}"
 
-    def layout(self, content: str, title: str = "QuickShare") -> str:
-        return f"""<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>{title}</title><style>:root{{color-scheme:light}}body{{background:#f5f7fb;color:#172033;font-family:system-ui,sans-serif;max-width:740px;margin:0 auto;padding:32px 18px}}h1{{margin:0 0 6px}}.sub{{color:#596579;margin:0 0 24px}}section{{background:white;border:1px solid #dde3ed;border-radius:16px;padding:20px;margin:14px 0;box-shadow:0 2px 8px #2030500c}}.choices{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}button,.button{{background:#1955d6;color:white;border:0;border-radius:10px;padding:12px 15px;font:inherit;font-weight:650;cursor:pointer;text-decoration:none;display:inline-block}}button.secondary,.button.secondary{{background:#eef2fb;color:#24477e}}input,textarea{{font:inherit;margin:8px 0;max-width:100%}}textarea{{width:100%;box-sizing:border-box}}small,.hint{{color:#596579}}.danger{{background:#a92a2a}}.error{{color:#a72b2b;background:#fff0f0;padding:10px;border-radius:8px}}.qr{{width:min(280px,90vw);image-rendering:pixelated;background:white;padding:12px;border-radius:12px}}ul{{padding-left:22px}}</style></head><body>{content}</body></html>"""
+    def serve_static_asset(self, filename: str) -> None:
+        frontend_dir = Path(__file__).with_name("frontend")
+        target = (frontend_dir / filename).resolve()
+        if not target.is_file() or target.parent != frontend_dir.resolve():
+            return self.deny(HTTPStatus.NOT_FOUND, "Static file not found.")
+        ctype = "text/plain; charset=utf-8"
+        if filename.endswith(".css"):
+            ctype = "text/css; charset=utf-8"
+        elif filename.endswith(".js"):
+            ctype = "application/javascript; charset=utf-8"
+        elif filename.endswith(".html"):
+            ctype = "text/html; charset=utf-8"
+        self.send_text(target.read_text(encoding="utf-8"), HTTPStatus.OK, ctype)
 
-    def admin_page(self, error: str = "") -> str:
-        state = self.server.state; base = self.admin_path()
-        notice = f"<p class='error'>{html.escape(error)}</p>" if error else ""
-        if state.phone_token:
-            action = "Receive from phone" if state.mode == "receive" else f"Send {html.escape(state.selection_label)} to phone"
-            qr = self.qr_data_uri()
-            qr_html = f"<img class='qr' src='{qr}' alt='Scan this QR code with your phone'>" if qr else f"<p><a href='{html.escape(self.phone_url())}'>{html.escape(self.phone_url())}</a></p>"
-            activity = ""
-            if state.mode == "receive":
-                items = "".join(f"<li>{html.escape(item)}</li>" for item in reversed(state.received)) or "<li>Waiting for your phone…</li>"
-                activity = f"<section><h2>Received</h2><ul>{items}</ul><p class='hint'>This updates automatically.</p></section><script>setTimeout(() => location.reload(), 2000)</script>"
-            return self.layout(f"<h1>QuickShare</h1><p class='sub'>{action}</p><section><h2>Scan with your phone</h2>{qr_html}<p class='hint'>Keep this page open while sharing.</p></section>{activity}<form method='post' action='{base}/stop'><button class='danger'>Stop sharing</button></form>")
-        if state.screen == "home":
-            return self.layout(f"""<h1>QuickShare</h1><p class='sub'>What do you want to do?</p>{notice}<div class='choices'><section><h2>Send</h2><p>Send something from this laptop to your phone.</p><form method='post' action='{base}/open-send'><button>Send to phone</button></form></section><section><h2>Receive</h2><p>Send something from your phone to this laptop.</p><form method='post' action='{base}/receive'><button>Receive from phone</button></form></section></div><form method='post' action='{base}/stop'><button class='danger'>Close app</button></form>""")
-        selected = f"<p><strong>Ready:</strong> {html.escape(state.selection_label)}</p><form method='post' action='{base}/send'><button>Generate QR code</button></form>" if state.downloads else ""
-        return self.layout(f"""<h1>QuickShare</h1><p class='sub'>Choose what to send from this laptop.</p>{notice}<section><div class='choices'><form method='post' action='{base}/clipboard'><button class='secondary'>Clipboard</button></form><form method='post' action='{base}/images' enctype='multipart/form-data'><label class='button secondary'>Images<input type='file' name='items' accept='image/*' multiple hidden onchange='this.form.submit()'></label></form><form method='post' action='{base}/files' enctype='multipart/form-data'><label class='button secondary'>Files<input type='file' name='items' multiple hidden onchange='this.form.submit()'></label></form><form method='post' action='{base}/folder' enctype='multipart/form-data'><label class='button secondary'>Folder<input type='file' name='folderitems' multiple webkitdirectory hidden onchange='this.form.submit()'></label></form></div><p class='hint'>Folders are converted to a ZIP file. {html.escape(state.selection_label)}</p>{selected}</section><form method='post' action='{base}/home'><button class='secondary'>Back</button></form><form method='post' action='{base}/stop'><button class='danger'>Close app</button></form>""")
+    def serve_static_asset(self, filename: str) -> None:
+        frontend_dir = Path(__file__).with_name("frontend")
+        target = (frontend_dir / filename).resolve()
+        if not target.is_file() or target.parent != frontend_dir.resolve():
+            return self.deny(HTTPStatus.NOT_FOUND, "Static file not found.")
+        ctype = "text/plain; charset=utf-8"
+        if filename.endswith(".css"):
+            ctype = "text/css; charset=utf-8"
+        elif filename.endswith(".js"):
+            ctype = "application/javascript; charset=utf-8"
+        elif filename.endswith(".html"):
+            ctype = "text/html; charset=utf-8"
+        self.send_text(target.read_text(encoding="utf-8"), HTTPStatus.OK, ctype)
 
-    def phone_page(self) -> str:
-        state = self.server.state; base = self.phone_path()
-        if state.mode == "send":
-            links = "".join(f"<li><a href='{base}/download/{i}' download>{html.escape(file.name)}</a> <small>{file.stat().st_size / MIB:.1f} MiB</small></li>" for i, file in enumerate(state.downloads) if file.exists())
-            return self.layout(f"<h1>QuickShare</h1><p class='sub'>Download from laptop</p><section><ul>{links or '<li>Nothing is available.</li>'}</ul></section>")
-        return self.layout(f"""<h1>QuickShare</h1><p class='sub'>Send to laptop</p><section><form method='post' action='{base}/upload' enctype='multipart/form-data'><label>Text<textarea name='message' rows='5' placeholder='Type or paste text'></textarea></label><br><label>Files<input type='file' name='files' multiple></label><br><label>Folder<input type='file' name='files' multiple webkitdirectory></label><p class='hint'>If the folder option is unavailable, upload a ZIP.</p><button>Send to laptop</button></form><p class='hint'>Items are saved in: {html.escape(str(state.inbox))}</p></section>""")
-
+    def render_app_page(self, role: str = "laptop", error: str = "") -> str:
+        state = self.server.state
+        base_path = self.admin_path() if role == "laptop" else self.phone_path()
+        qr_uri = self.qr_data_uri() if role == "laptop" else ""
+        phone_link = self.phone_url()
+        initial_state = {
+            "role": role,
+            "basePath": base_path,
+            "screen": state.screen if role == "laptop" else "workspace",
+            "initialFocus": state.initial_focus,
+            "phoneConnected": state.phone_connected,
+            "phoneUrl": phone_link,
+            "qrDataUri": qr_uri,
+            "maxUploadMib": state.max_upload // MIB,
+            "remainingSeconds": state.remaining_seconds(),
+            "error": error,
+            "items": [
+                it.to_dict(base_path) for it in reversed(state.items)
+            ],
+        }
+        state_json = json.dumps(initial_state, ensure_ascii=False).replace("</", "<\\/")
+        title = "QuickShare • Laptop Hub" if role == "laptop" else "QuickShare • Mobile Hub"
+        template_path = Path(__file__).with_name("frontend") / "index.html"
+        template_html = template_path.read_text(encoding="utf-8")
+        return template_html.replace("__PAGE_TITLE__", html.escape(title)).replace(
+            "__INITIAL_STATE_JSON__", state_json
+        )
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Start the temporary QuickShare web app.")
+    parser = argparse.ArgumentParser(
+        description="Start the temporary two-way QuickShare web app."
+    )
     parser.add_argument("--bind", help="Private LAN IPv4 address to bind")
-    parser.add_argument("--port", type=int, default=0, help="Port (default: a random available port)")
-    parser.add_argument("--minutes", type=int, default=60, help="Session timeout in minutes; 0 means manual stop")
-    parser.add_argument("--max-upload-mib", type=int, default=500, help="Maximum upload request size in MiB")
-    parser.add_argument("--inbox", default="~/QuickShare-Inbox", help="Where phone uploads are saved")
+    parser.add_argument(
+        "--port", type=int, default=8765, help="Port (default: 8765 for a consistent URL; use 0 for random)"
+    )
+    parser.add_argument(
+        "--random-token",
+        action="store_true",
+        help="Generate random one-time URL tokens on each launch",
+    )
+    parser.add_argument(
+        "--minutes",
+        type=int,
+        default=60,
+        help="Session timeout in minutes; 0 means manual stop",
+    )
+    parser.add_argument(
+        "--max-upload-mib",
+        type=int,
+        default=500,
+        help="Maximum upload request size in MiB",
+    )
+    parser.add_argument(
+        "--inbox",
+        default="~/QuickShare-Inbox",
+        help="Optional directory when --save-inbox is used",
+    )
+    parser.add_argument(
+        "--save-inbox",
+        action="store_true",
+        help="Also save copies of incoming phone uploads to --inbox directory",
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not automatically open the laptop browser",
+    )
     args = parser.parse_args()
-    if args.minutes < 0 or args.max_upload_mib < 1 or not 0 <= args.port <= 65535: parser.error("Invalid limit or port")
+    if args.minutes < 0 or args.max_upload_mib < 1 or not 0 <= args.port <= 65535:
+        parser.error("Invalid limit or port")
     addresses = private_ipv4_addresses()
-    bind_ip = args.bind or (addresses[0] if len(addresses) == 1 else None)
-    if not bind_ip: parser.error("Could not select a private LAN address. Use --bind <your Wi-Fi IPv4>. Found: " + ", ".join(addresses or ["none"]))
+    bind_ip = args.bind or (addresses[0] if addresses else None)
+    if not bind_ip:
+        parser.error(
+            "Could not select a private LAN address. Use --bind <your Wi-Fi IPv4>. Found: "
+            + ", ".join(addresses or ["none"])
+        )
     try:
-        if not ipaddress.ip_address(bind_ip).is_private: parser.error("--bind must be a private IPv4 address")
-    except ValueError: parser.error("--bind must be an IPv4 address")
+        if not ipaddress.ip_address(bind_ip).is_private:
+            parser.error("--bind must be a private IPv4 address")
+    except ValueError:
+        parser.error("--bind must be an IPv4 address")
+
     with tempfile.TemporaryDirectory(prefix="quickshare-") as work:
         state = ShareState(args, bind_ip, Path(work))
-        server = QuickShareServer((bind_ip, args.port), state)
-        url = f"http://{bind_ip}:{server.server_port}/app/{state.admin_token}"
-        print("QuickShare is running (no background service).\nLaptop app:", url, "\nPress Ctrl+C to stop.", flush=True)
-        timer = threading.Timer(args.minutes * 60, server.shutdown) if args.minutes else None
-        if timer: timer.daemon = True; timer.start()
         try:
-            webbrowser.open(url); server.serve_forever(poll_interval=.5)
-        except KeyboardInterrupt: print("\nStopping QuickShare…")
+            server = QuickShareServer((bind_ip, args.port), state)
+        except OSError:
+            server = QuickShareServer((bind_ip, 0), state)
+        admin_route = f"/app/{state.admin_token}" if state.admin_token else "/app"
+        phone_route = f"/share/{state.phone_token}" if state.phone_token else "/share"
+        url = f"http://{bind_ip}:{server.server_port}{admin_route}"
+        phone_url = f"http://{bind_ip}:{server.server_port}{phone_route}"
+        print(
+            "QuickShare is running (two-way session, no background service).\nLaptop URL:",
+            url,
+            "\nPhone URL (same every time — bookmark it!):",
+            phone_url,
+            "\nPress Ctrl+C to stop.",
+            flush=True,
+        )
+        timer = (
+            threading.Timer(args.minutes * 60, server.shutdown)
+            if args.minutes
+            else None
+        )
+        if timer:
+            timer.daemon = True
+            timer.start()
+        try:
+            if not args.no_browser:
+                webbrowser.open(url)
+            server.serve_forever(poll_interval=0.5)
+        except KeyboardInterrupt:
+            print("\nStopping QuickShare…")
         finally:
             server.server_close()
-            if timer: timer.cancel()
-    print("QuickShare stopped. Phone uploads remain in ~/QuickShare-Inbox.")
+            if timer:
+                timer.cancel()
+    print("QuickShare stopped.")
     return 0
 
 
