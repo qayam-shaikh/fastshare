@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5">
+  <title>__PAGE_TITLE__</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="ambient-glow" aria-hidden="true"></div>
+
+  <div class="app-container">
+    <!-- Top Navigation Bar -->
+    <header class="topbar">
+      <div class="brand-group">
+        <div class="brand-emblem" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M7 10l5-6 5 6"/>
+            <path d="M12 4v12"/>
+            <path d="M17 14l-5 6-5-6"/>
+          </svg>
+        </div>
+        <div class="brand-copy">
+          <div class="brand-title-row">
+            <h1 class="brand-name">QuickShare</h1>
+            <span class="role-badge" id="roleBadge">LAPTOP HUB</span>
+          </div>
+          <p class="brand-subtitle" id="sessionSub">Direct Wi-Fi Bridge • Zero Cloud • End-to-End Local</p>
+        </div>
+      </div>
+
+      <div class="topbar-controls">
+        <div class="connection-pill" id="connectionBadge">
+          <span class="pulse-dot"></span>
+          <span id="connectionText">Waiting for phone…</span>
+        </div>
+
+        <button type="button" class="btn btn-outline btn-sm" id="backHomeBtn" style="display:none" onclick="goHomeScreen()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+          <span>Modes</span>
+        </button>
+
+        <button type="button" class="btn btn-outline btn-sm" id="toggleQrBtn" style="display:none" onclick="toggleQrPanel()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
+          <span id="toggleQrLabel">Hide QR</span>
+        </button>
+
+        <button type="button" class="btn btn-icon" id="themeToggleBtn" onclick="toggleTheme()" title="Toggle Light/Dark Mode" aria-label="Toggle theme">
+          <svg id="themeIconSun" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="display:none"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          <svg id="themeIconMoon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+
+        <button type="button" class="btn btn-danger-soft btn-sm" id="stopAppBtn" style="display:none" onclick="openStopModal()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          <span>Stop Session</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Error Alert Banner -->
+    <div id="errorBanner" class="error-banner" role="alert"></div>
+
+    <!-- SCREEN 1: Symmetric Launch Mode Selector (Laptop Only) -->
+    <main id="homeScreen" class="home-stage" style="display:none">
+      <div class="hero-panel">
+        <div class="hero-eyebrow">
+          <span class="eyebrow-dot"></span>
+          <span>TWO-WAY INSTANT LAN WORKSPACE</span>
+        </div>
+        <h2 class="hero-heading">Choose how you want to begin</h2>
+        <p class="hero-lead">
+          Pick either direction to launch your workspace. Once connected, both devices can <strong>send and receive back and forth</strong> in the same session without restarting.
+        </p>
+
+        <div class="mode-cards-grid">
+          <!-- Card 1: Send to Phone -->
+          <div class="mode-choice-card send-variant" onclick="startWorkspace('send')" role="button" tabindex="0">
+            <div class="mode-card-top">
+              <div class="mode-badge-row">
+                <div class="mode-icon-box indigo">
+                  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+                </div>
+                <span class="direction-tag">LAPTOP → PHONE</span>
+              </div>
+              <h3 class="mode-card-title">Send to Phone</h3>
+              <p class="mode-card-desc">
+                Push files, high-res photos, entire folders (auto-zipped), or clipboard text from this laptop straight to your phone.
+              </p>
+              <div class="feature-chips">
+                <span class="chip">Files &amp; Folders</span>
+                <span class="chip">Photos</span>
+                <span class="chip">Clipboard &amp; Text</span>
+              </div>
+            </div>
+            <div class="mode-card-cta">
+              <span class="btn btn-primary btn-full">
+                <span>Start Sending</span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+              </span>
+            </div>
+          </div>
+
+          <!-- Card 2: Receive from Phone -->
+          <div class="mode-choice-card receive-variant" onclick="startWorkspace('receive')" role="button" tabindex="0">
+            <div class="mode-card-top">
+              <div class="mode-badge-row">
+                <div class="mode-icon-box emerald">
+                  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                </div>
+                <span class="direction-tag emerald">PHONE → LAPTOP</span>
+              </div>
+              <h3 class="mode-card-title">Receive from Phone</h3>
+              <p class="mode-card-desc">
+                Open the static phone URL or scan the QR code to upload camera photos, videos, folders, or notes to this laptop.
+              </p>
+              <div class="feature-chips">
+                <span class="chip">Camera Roll</span>
+                <span class="chip">Documents &amp; ZIPs</span>
+                <span class="chip">Quick Notes</span>
+              </div>
+            </div>
+            <div class="mode-card-cta">
+              <span class="btn btn-emerald btn-full">
+                <span>Start Receiving</span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Static URL Quick Bar on Home Screen -->
+        <div class="home-quick-bar">
+          <div class="quick-bar-left">
+            <span class="quick-bar-label">Static Phone URL (Bookmark once):</span>
+            <code class="quick-bar-url" id="homePhoneUrl"></code>
+          </div>
+          <div class="quick-bar-actions">
+            <button type="button" class="btn btn-outline btn-sm" onclick="copyTextWithFallback(STATE.phoneUrl, this)">Copy URL</button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- SCREEN 2: Unified Two-Way Bento Workspace -->
+    <main id="workspaceScreen" class="workspace-bento" style="display:none">
+      <!-- LEFT COLUMN: Always-Visible Send Hub (No scrolling needed!) -->
+      <section class="bento-card send-hub-card" id="sendPanel">
+        <div class="card-head">
+          <div class="card-title-group">
+            <div class="section-icon indigo">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+            </div>
+            <div>
+              <h2 class="card-title" id="sendPanelTitle">Send to Phone</h2>
+              <p class="card-subtitle" id="sendPanelSub">Share files, photos, folders, or text immediately</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Hidden Native File Inputs -->
+        <input type="file" id="imageInput" accept="image/*" multiple hidden onchange="uploadSelectedFiles(this.files, false); this.value=''">
+        <input type="file" id="fileInput" multiple hidden onchange="uploadSelectedFiles(this.files, false); this.value=''">
+        <input type="file" id="folderInput" webkitdirectory directory multiple hidden onchange="uploadSelectedFiles(this.files, true); this.value=''">
+
+        <!-- 2x2 Tactile Action Tiles -->
+        <div class="action-tiles-grid">
+          <button type="button" class="tile-btn" onclick="document.getElementById('imageInput').click()">
+            <div class="tile-icon emerald">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            </div>
+            <div class="tile-text">
+              <span class="tile-title">Images</span>
+              <span class="tile-hint">PNG, JPG, WebP</span>
+            </div>
+          </button>
+
+          <button type="button" class="tile-btn" onclick="document.getElementById('fileInput').click()">
+            <div class="tile-icon indigo">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            </div>
+            <div class="tile-text">
+              <span class="tile-title">Files</span>
+              <span class="tile-hint">Docs, PDFs, Media</span>
+            </div>
+          </button>
+
+          <button type="button" class="tile-btn" onclick="document.getElementById('folderInput').click()">
+            <div class="tile-icon violet">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <div class="tile-text">
+              <span class="tile-title">Folder</span>
+              <span class="tile-hint">Auto-packed as ZIP</span>
+            </div>
+          </button>
+
+          <button type="button" class="tile-btn" id="clipboardBtn" onclick="shareClipboard()">
+            <div class="tile-icon amber">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
+            </div>
+            <div class="tile-text">
+              <span class="tile-title" id="clipboardBtnLabel">Clipboard</span>
+              <span class="tile-hint">1-click instant paste</span>
+            </div>
+          </button>
+        </div>
+
+        <!-- Desktop-Only Drag & Drop Zone (Hidden on Mobile Touch Devices) -->
+        <div class="dropzone-box" id="dropzone">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <span><strong>Drag &amp; drop files here</strong> or click a tile above</span>
+        </div>
+
+        <!-- Text Snippet Composer -->
+        <div class="composer-box">
+          <div class="composer-label-row">
+            <label for="textMessageInput" class="composer-label">Share Text, Links, or Code Snippet</label>
+            <span class="char-counter" id="charCounter">0 chars</span>
+          </div>
+          <textarea id="textMessageInput" rows="3" placeholder="Type or paste text, URLs, or code here…" oninput="updateCharCounter()"></textarea>
+          <button type="button" class="btn btn-primary btn-full" onclick="sendTextMessage()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            <span>Send Text</span>
+          </button>
+        </div>
+
+        <!-- Live Upload Progress Bar -->
+        <div class="upload-progress" id="uploadProgressWrap">
+          <div class="progress-meta">
+            <span id="uploadProgressLabel">Uploading…</span>
+            <span id="uploadProgressPct">0%</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-fill" id="uploadProgressBar"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT COLUMN: Compact Connection Banner + Shared Session Feed -->
+      <div class="right-bento-stack">
+        <!-- Compact Horizontal Phone Connect Card (Laptop Only) -->
+        <section class="bento-card qr-banner-card" id="qrPanel" style="display:none">
+          <div class="qr-banner-layout">
+            <div class="qr-frame-wrap">
+              <img id="qrImage" class="qr-code-img" alt="Scan QR code with your phone">
+            </div>
+            <div class="qr-banner-info">
+              <div class="qr-banner-top">
+                <div>
+                  <span class="qr-kicker">INSTANT MOBILE LINK</span>
+                  <h3 class="qr-banner-title">Connect Your Phone</h3>
+                </div>
+                <button type="button" class="btn btn-outline btn-xs" onclick="toggleQrPanel()">Hide</button>
+              </div>
+              <p class="qr-banner-desc">
+                Your phone URL stays the same every time. Bookmark it once to connect without scanning, or scan the QR code on the left.
+              </p>
+              <div class="url-copy-bar">
+                <code class="url-text" id="phoneUrlText"></code>
+                <button type="button" class="btn btn-primary btn-xs" onclick="copyTextWithFallback(STATE.phoneUrl, this)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                  <span>Copy URL</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Shared Session Feed Card -->
+        <section class="bento-card feed-hub-card">
+          <div class="feed-header">
+            <div class="card-title-group">
+              <div class="section-icon emerald">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+              </div>
+              <div>
+                <h2 class="card-title">Shared in This Session</h2>
+                <p class="card-subtitle">Click any item below to copy or download</p>
+              </div>
+            </div>
+
+            <div class="segmented-tabs" role="tablist">
+              <button type="button" class="seg-tab active" data-filter="all" onclick="setFeedFilter('all')">
+                <span>All</span>
+                <span class="tab-count" id="countAll">0</span>
+              </button>
+              <button type="button" class="seg-tab" data-filter="incoming" onclick="setFeedFilter('incoming')">
+                <span>Received</span>
+                <span class="tab-count" id="countIncoming">0</span>
+              </button>
+              <button type="button" class="seg-tab" data-filter="outgoing" onclick="setFeedFilter('outgoing')">
+                <span>Sent</span>
+                <span class="tab-count" id="countOutgoing">0</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="itemsContainer" class="feed-items-list"></div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- Full-Screen Image Lightbox Modal -->
+  <div class="modal-backdrop" id="lightbox" onclick="closeLightbox()">
+    <div class="lightbox-inner" onclick="event.stopPropagation()">
+      <img id="lightboxImg" src="" alt="Full size preview">
+      <button type="button" class="lightbox-close" onclick="closeLightbox()" aria-label="Close preview">✕</button>
+    </div>
+  </div>
+
+  <!-- Stop Session Confirmation Modal (Sandbox-safe, replaces native confirm) -->
+  <div class="modal-backdrop" id="stopModal" onclick="closeStopModal()">
+    <div class="confirm-dialog" onclick="event.stopPropagation()">
+      <h3 class="dialog-title">Stop QuickShare Session?</h3>
+      <p class="dialog-desc">This will close the local sharing server and clear temporary session files.</p>
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-outline" onclick="closeStopModal()">Cancel</button>
+        <button type="button" class="btn btn-danger" onclick="confirmStopSession()">Stop Server</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification -->
+  <div class="toast-notification" id="toastBanner" role="status" aria-live="polite"></div>
+
+  <script>
+    window.__INITIAL_STATE__ = __INITIAL_STATE_JSON__;
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
