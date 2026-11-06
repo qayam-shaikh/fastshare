@@ -1,31 +1,27 @@
 # QuickShare LAN
 
-QuickShare is an on-demand sharing app for an Ubuntu laptop and an Android phone on the same Wi-Fi network. It has no background service, cloud account, or Android app.
+QuickShare is an on-demand, **two-way** file and text sharing web app for an Ubuntu laptop and a phone on the same Wi-Fi network. It requires no background service, cloud account, or mobile app install.
 
-## Use
+## Project Structure (Separated Frontend & Backend)
 
-Start QuickShare with the single keyboard shortcut. The browser opens on the laptop.
-
-1. Choose **Receive** when your phone will send something to the laptop. A QR code appears immediately; scan it on Android and upload text, files, or folders (ZIP is the fallback).
-2. Choose **Send** when the laptop will send something to the phone.
-3. Choose one option: **Clipboard**, **Images**, **Files**, or **Folder**.
-4. Select the item, click **Generate QR code**, and scan it on Android. Download the displayed item from the phone page.
-
-Folders are automatically converted to ZIP files before sending. Incoming phone uploads are saved under `~/QuickShare-Inbox/<session-date>/`.
-
-## Start manually
-
-```bash
-./quickshare
+```text
+fastshare-main/
+├── quickshare              # CLI launcher script
+├── quickshare.py           # Pure Python HTTP/REST backend server
+├── frontend/
+│   ├── index.html          # Semantic HTML layout (Home + Bento Workspace)
+│   ├── styles.css          # Responsive Bento grid & Light/Dark design system
+│   └── app.js              # Frontend state, live polling, XHR upload progress & cards
+├── requirements.txt
+└── .quickshare_vendor/     # Vendored QR code generator
 ```
 
-The app opens in the browser and stays available only while its terminal is open. Click **Stop sharing**, **Close app**, or press `Ctrl+C` to stop it. Sessions automatically stop after 60 minutes.
+## Key Features
 
-## Safety
-
-- Each run uses new, unguessable control and phone-session links.
-- The laptop control page is accessible only from the laptop; the QR link is limited to private LAN clients.
-- Default upload limit is 500 MiB per request; change it with `--max-upload-mib`.
-- Never port-forward QuickShare or use it on a public/guest network.
-
-Both devices must be on the same Wi-Fi network without client isolation. If UFW is active, temporarily allow the port QuickShare prints, restricted to the local network, then remove that rule after sharing.
+- **Consistent Static URL (`http://<laptop-ip>:8765/share`):** Uses port `8765` and fixed paths (`/app` on laptop, `/share` on phone) so you can bookmark the phone URL once and open it anytime without scanning—while still keeping the QR code available on screen.
+- **Two-Way Sharing in a Single Session:** Start from either **Send to Phone** or **Receive from Phone** and freely share items both ways in the same session.
+- **Smart Interactive Cards (No Forced Auto-Downloads):**
+  - **Text:** Displays text with a **Copy to Clipboard** button, or a **Download `.txt`** board if the text exceeds 2,000 characters.
+  - **Images:** Displays an inline **image preview** (with click-to-zoom lightbox) and a **Download Image** button.
+  - **ZIP & Folders:** Automatically compresses uploaded folders into a `.zip` archive and shows a **ZIP icon**, archive name, size, and **Download ZIP** button.
+  - **Files:** Shows a **file icon**, file name, size, and **Download File** button.
