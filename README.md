@@ -10,7 +10,7 @@ QuickShare is a private, two-way file and text sharing app for an **Ubuntu or Wi
 
 ### Android phone
 
-![QuickShare Controls page at a phone-sized viewport](docs/screenshots/mobile-controls.png)
+![QuickShare Share page on a phone](docs/screenshots/mobile-share.png)
 
 ## What you can do
 
