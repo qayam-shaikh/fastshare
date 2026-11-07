@@ -12,6 +12,18 @@ QuickShare binds to port `8765` and automatically uses **mDNS (`.local` ZeroConf
 
 > **Tip for `quickshare.local` on Ubuntu:** If `avahi-utils` is installed (`sudo apt install avahi-utils`), QuickShare automatically publishes the `quickshare.local` alias on your active Wi-Fi IP while the app is running. Otherwise, it automatically falls back to your laptop's built-in Ubuntu mDNS name (`http://<your-hostname>.local:8765/phone`).
 
+## Paste screenshots from the clipboard
+
+On the Laptop Hub, copy a screenshot to the clipboard (for example with `PrtSc` or `Shift+PrtSc`) and press `Ctrl+V` anywhere on the page to upload it directly to the session. No need to save the screenshot as a file first. Regular text pasting is unchanged.
+
+## Links in shared text
+
+Shared text snippets automatically linkify web URLs, email addresses, and phone numbers. Tap a web link to open it in the mobile browser, an email address to compose a message, or a phone number to open the phone's dialer. The original text can still be copied with **Copy to Clipboard**.
+
+## Download received items together
+
+When at least two items have been received on a device, use **Download All (ZIP)** above the session feed to download them as one archive.
+
 ## Project Structure
 
 ```text

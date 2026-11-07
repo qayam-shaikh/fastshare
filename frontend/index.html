@@ -214,7 +214,7 @@
         <!-- Desktop-Only Drag & Drop Zone (Hidden on Mobile Touch Devices) -->
         <div class="dropzone-box" id="dropzone">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          <span><strong>Drag &amp; drop files here</strong> or click a tile above</span>
+          <span><strong>Drag &amp; drop files here</strong>, click a tile, or press <strong>Ctrl+V</strong> to share a screenshot</span>
         </div>
 
         <!-- Text Snippet Composer -->
@@ -303,6 +303,13 @@
                 <span class="tab-count" id="countOutgoing">0</span>
               </button>
             </div>
+          </div>
+
+          <div class="feed-batch-actions" id="feedBatchActions" hidden>
+            <a class="btn btn-primary btn-sm" id="downloadAllBtn" href="#">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              <span>Download All (ZIP)</span>
+            </a>
           </div>
 
           <div id="itemsContainer" class="feed-items-list"></div>

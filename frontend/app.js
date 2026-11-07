@@ -77,6 +77,56 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+function linkifyText(value) {
+  const text = String(value == null ? "" : value);
+  const pattern = /https?:\/\/[^\s<>"']+|www\.[^\s<>"']+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}|(?<![@\w])(?:[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?\.)+[A-Z]{2,}(?::\d{1,5})?(?:\/[^\s<>"']*)?|(?<![\w@])\+?\d[\d(). -]{5,}\d(?![\w])/gi;
+  const matches = text.matchAll(pattern);
+  let output = "";
+  let cursor = 0;
+
+  for (const match of matches) {
+    const raw = match[0];
+    let label = raw;
+    let href = "";
+    let type = "";
+
+    if (/^(?:https?:\/\/|www\.)/i.test(raw) || /^(?<![@\w])(?:[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?\.)+[A-Z]{2,}/i.test(raw)) {
+      label = raw.replace(/[.,!?;:]+$/, "");
+      while (/[)\]}]$/.test(label)) {
+        const closing = label.slice(-1);
+        const opening = closing === ")" ? "(" : closing === "]" ? "[" : "{";
+        if (label.split(closing).length <= label.split(opening).length) break;
+        label = label.slice(0, -1);
+      }
+      if (!label) continue;
+      href = /^https?:\/\//i.test(label) ? label : `https://${label}`;
+      type = "url";
+    } else if (raw.includes("@")) {
+      href = `mailto:${raw}`;
+      type = "email";
+    } else {
+      const dateStart = raw.search(/\s+\d{4}-\d{2}-\d{2}\b/);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) continue;
+      if (dateStart >= 0) label = raw.slice(0, dateStart).trimEnd();
+      const digits = label.replace(/\D/g, "");
+      if (digits.length < 7 || digits.length > 15) continue;
+      href = `tel:${label.startsWith("+") ? "+" : ""}${digits}`;
+      type = "phone";
+    }
+
+    const matchStart = match.index;
+    const matchEnd = matchStart + raw.length;
+    const linkEnd = matchStart + label.length;
+    const targetAttrs = type === "url" ? ' target="_blank" rel="noopener noreferrer"' : "";
+    output += escapeHtml(text.slice(cursor, matchStart));
+    output += `<a href="${escapeHtml(href)}" class="text-snippet-link text-snippet-link-${type}"${targetAttrs}>${escapeHtml(label)}</a>`;
+    output += escapeHtml(text.slice(linkEnd, matchEnd));
+    cursor = matchEnd;
+  }
+
+  return output + escapeHtml(text.slice(cursor));
+}
+
 function updateCharCounter() {
   const ta = document.getElementById("textMessageInput");
   const counter = document.getElementById("charCounter");
@@ -193,7 +243,7 @@ function renderItemCard(item) {
     if (item.text_too_long) {
       bodyHtml = `
         <div class="transfer-body">
-          <pre class="text-snippet-pre">${escapeHtml(item.text_content)}</pre>
+          <pre class="text-snippet-pre">${linkifyText(item.text_content)}</pre>
           <div class="txt-board">
             <div class="txt-board-left">
               ${getSvgIcon("text")}
@@ -212,7 +262,7 @@ function renderItemCard(item) {
     } else {
       bodyHtml = `
         <div class="transfer-body">
-          <pre class="text-snippet-pre">${escapeHtml(item.text_content)}</pre>
+          <pre class="text-snippet-pre">${linkifyText(item.text_content)}</pre>
           <div class="txt-board" id="txtBoard_${escapeHtml(item.id)}" style="display:none">
             <div class="txt-board-left">
               ${getSvgIcon("text")}
@@ -310,6 +360,12 @@ function renderFeed(force = false) {
   document.getElementById("countAll").textContent = allItems.length;
   document.getElementById("countIncoming").textContent = incomingItems.length;
   document.getElementById("countOutgoing").textContent = outgoingItems.length;
+  const downloadAllBtn = document.getElementById("downloadAllBtn");
+  const feedBatchActions = document.getElementById("feedBatchActions");
+  if (downloadAllBtn && feedBatchActions) {
+    downloadAllBtn.href = `${STATE.basePath}/download-all`;
+    feedBatchActions.hidden = incomingItems.length < 2;
+  }
 
   let filtered = allItems;
   if (currentFilter === "incoming") filtered = incomingItems;
@@ -537,6 +593,39 @@ async function uploadSelectedFiles(fileList, isFolder) {
   await performFormDataUpload(fd, label);
 }
 
+function getPastedImageFiles(clipboardData) {
+  if (!clipboardData || !clipboardData.items) return [];
+
+  const imageTypes = {
+    "image/avif": "avif",
+    "image/bmp": "bmp",
+    "image/gif": "gif",
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/svg+xml": "svg",
+    "image/tiff": "tiff",
+    "image/webp": "webp"
+  };
+  const files = [];
+
+  Array.from(clipboardData.items).forEach((item, index) => {
+    if (item.kind !== "file" || !item.type.startsWith("image/")) return;
+    const image = item.getAsFile();
+    if (!image) return;
+
+    const extension = image.name.match(/\.([a-z0-9]+)$/i)?.[1]
+      || imageTypes[image.type.toLowerCase()]
+      || image.type.split("/")[1]?.split("+")[0]
+      || "png";
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    files.push(new File([image], `screenshot-${timestamp}-${index + 1}.${extension}`, {
+      type: image.type || item.type
+    }));
+  });
+
+  return files;
+}
+
 function performFormDataUpload(formData, labelText) {
   return new Promise((resolve) => {
     const wrap = document.getElementById("uploadProgressWrap");
@@ -633,6 +722,15 @@ async function pollState() {
     updateUI();
   } catch (_) {}
 }
+
+document.addEventListener("paste", (event) => {
+  if (STATE.role !== "laptop") return;
+  const images = getPastedImageFiles(event.clipboardData);
+  if (images.length === 0) return;
+
+  event.preventDefault();
+  void uploadSelectedFiles(images, false);
+});
 
 // Drag & Drop Setup
 const dz = document.getElementById("dropzone");

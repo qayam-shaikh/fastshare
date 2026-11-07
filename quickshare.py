@@ -26,6 +26,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
+from typing import BinaryIO
 
 MIB = 1024 * 1024
 MAX_CLIPBOARD_CHARS = 2000
@@ -574,6 +575,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_html(self.render_app_page(role="laptop"))
             if suffix == "/api/state":
                 return self.handle_api_state(role="laptop")
+            if suffix == "/download-all":
+                return self.serve_received_zip("laptop")
             if suffix.startswith("/download/"):
                 return self.serve_item_file(suffix.rsplit("/", 1)[1], inline=False)
             if suffix.startswith("/preview/"):
@@ -587,6 +590,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_html(self.render_app_page(role="phone"))
             if suffix == "/api/state":
                 return self.handle_api_state(role="phone")
+            if suffix == "/download-all":
+                return self.serve_received_zip("phone")
             if suffix.startswith("/download/"):
                 return self.serve_item_file(suffix.rsplit("/", 1)[1], inline=False)
             if suffix.startswith("/preview/"):
@@ -819,6 +824,78 @@ class Handler(BaseHTTPRequestHandler):
                 shutil.copyfileobj(source, self.wfile)
         except (OSError, BrokenPipeError):
             pass
+
+    def serve_received_zip(self, role: str) -> None:
+        state = self.server.state
+        sources: list[tuple[BinaryIO, str]] = []
+        archive_path: Path | None = None
+        response_started = False
+
+        try:
+            with state.lock:
+                used_names: set[str] = set()
+                for item in state.items:
+                    if item.sender == role:
+                        continue
+                    try:
+                        source = item.path.open("rb")
+                    except FileNotFoundError:
+                        continue
+
+                    base_name = safe_name(item.name, "item")
+                    stem, suffix = Path(base_name).stem, Path(base_name).suffix
+                    archive_name = base_name
+                    index = 2
+                    while archive_name in used_names:
+                        archive_name = f"{stem} ({index}){suffix}"
+                        index += 1
+                    used_names.add(archive_name)
+                    sources.append((source, archive_name))
+
+            if len(sources) < 2:
+                return self.deny(
+                    HTTPStatus.NOT_FOUND,
+                    "At least two received items are required to create a ZIP.",
+                )
+
+            with tempfile.NamedTemporaryFile(
+                prefix="quickshare-received-",
+                suffix=".zip",
+                dir=state.work,
+                delete=False,
+            ) as temporary:
+                archive_path = Path(temporary.name)
+
+            with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for source, archive_name in sources:
+                    with archive.open(archive_name, "w") as destination:
+                        shutil.copyfileobj(source, destination, length=MIB)
+
+            size = archive_path.stat().st_size
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header(
+                "Content-Disposition",
+                "attachment; filename=\"quickshare-received.zip\"",
+            )
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            response_started = True
+            with archive_path.open("rb") as source:
+                shutil.copyfileobj(source, self.wfile, length=MIB)
+        except OSError as error:
+            if not response_started:
+                return self.deny(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    f"Could not create the ZIP download: {error}",
+                )
+        finally:
+            for source, _ in sources:
+                source.close()
+            if archive_path is not None:
+                archive_path.unlink(missing_ok=True)
 
     def qr_data_uri(self) -> str:
         vendor = Path(__file__).with_name(".quickshare_vendor")

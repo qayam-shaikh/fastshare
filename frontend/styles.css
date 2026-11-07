@@ -968,6 +968,16 @@ button,
   color: var(--text-secondary);
 }
 
+.feed-batch-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: 12px 0;
+}
+
+.feed-batch-actions[hidden] {
+  display: none;
+}
+
 .seg-tab.active .tab-count {
   background: var(--indigo-soft);
   color: var(--indigo-600);
@@ -1081,6 +1091,16 @@ button,
   max-height: 200px;
   overflow-y: auto;
   margin: 0;
+}
+
+.text-snippet-link {
+  color: var(--indigo-600);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.text-snippet-link:hover {
+  color: var(--indigo-700);
 }
 
 .txt-board {
