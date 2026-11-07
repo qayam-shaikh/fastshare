@@ -110,6 +110,10 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+html {
+  scrollbar-gutter: stable;
+}
+
 svg {
   flex-shrink: 0;
 }
@@ -770,11 +774,9 @@ button,
 @keyframes page-enter {
   from {
     opacity: 0;
-    transform: translateY(8px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
@@ -2149,6 +2151,12 @@ summary:focus-visible,
   grid-template-columns: minmax(0, 1fr);
 }
 
+#connectScreen .right-bento-stack {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+}
+
 .home-stage {
   max-width: 1040px;
   margin: 8px auto 0;
@@ -2625,7 +2633,7 @@ summary:focus-visible,
   }
 
   .workspace-navigation {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 2px;
     margin-bottom: 14px;
   }
@@ -2762,7 +2770,7 @@ summary:focus-visible,
   }
 
   .workspace-navigation {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .workspace-nav-link {
@@ -2788,5 +2796,149 @@ summary:focus-visible,
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+#laptopRemotePanel .remote-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+  padding: 2px 18px 18px;
+}
+
+#laptopRemotePanel .remote-screen-action {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 68px;
+  padding: 12px 14px;
+  border: 1px solid var(--indigo-border);
+  border-radius: 12px;
+  background: var(--indigo-soft);
+  color: var(--text-main);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+}
+
+#laptopRemotePanel .remote-screen-action:hover {
+  border-color: var(--indigo-600);
+  transform: translateY(-1px);
+}
+
+.remote-action-icon,
+.remote-control-icon {
+  display: grid;
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--indigo-600);
+}
+
+.remote-screen-label {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.remote-screen-label small {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-weight: 400;
+}
+
+.remote-screen-arrow {
+  color: var(--indigo-600);
+  font-size: 1.2rem;
+}
+
+.remote-control-group {
+  display: grid;
+  gap: 8px;
+}
+
+.remote-control-group h3 {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.remote-control-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.remote-control-button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: 52px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-subtle);
+  color: var(--text-main);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+}
+
+.remote-control-button:hover {
+  border-color: var(--indigo-border);
+  background: var(--indigo-soft);
+}
+
+.remote-control-button:active,
+#laptopRemotePanel .remote-screen-action:active {
+  transform: scale(0.98);
+}
+
+.remote-control-button .remote-control-icon {
+  flex-basis: 34px;
+  width: 34px;
+  height: 34px;
+  background: var(--bg-card);
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.remote-media-button {
+  border-color: var(--indigo-border);
+  background: var(--indigo-soft);
+}
+
+@media (max-width: 380px) {
+  #laptopRemotePanel .remote-actions {
+    gap: 15px;
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .remote-control-button {
+    gap: 7px;
+    padding: 6px 7px;
+    font-size: 0.73rem;
+  }
+
+  .remote-control-button .remote-control-icon {
+    flex-basis: 30px;
+    width: 30px;
+    height: 30px;
   }
 }

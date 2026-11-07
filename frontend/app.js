@@ -750,35 +750,57 @@ async function goHomeScreen() {
 function navigateWorkspace(view, updateHistory = true) {
   if (!WORKSPACE_VIEWS.includes(view)) return;
   const changed = activeWorkspaceView !== view;
+  if (changed) preserveWorkspaceScroll(view);
   activeWorkspaceView = view;
   if (updateHistory && changed) {
     const hash = view === "sharing" ? "" : `#${view}`;
     window.history.pushState({ quickshareView: view }, "", `${window.location.pathname}${window.location.search}${hash}`);
   }
   updateUI();
-  if (changed) {
-    const pageId = {
-      sharing: "workspaceScreen",
-      transfers: "transfersScreen",
-      scratchpad: "scratchpadScreen",
-      connect: "connectScreen",
-      controls: "connectScreen",
-      devices: "devicesScreen"
-    }[view];
-    const page = document.getElementById(pageId);
-    const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
-    page?.scrollIntoView({ behavior, block: "start" });
-    page?.classList.remove("page-enter");
-    requestAnimationFrame(() => page?.classList.add("page-enter"));
-    window.setTimeout(() => page?.classList.remove("page-enter"), 350);
-  }
+  if (!changed) return;
+  const pageId = {
+    sharing: "workspaceScreen",
+    transfers: "transfersScreen",
+    scratchpad: "scratchpadScreen",
+    connect: "connectScreen",
+    controls: "connectScreen",
+    devices: "devicesScreen"
+  }[view];
+  const page = document.getElementById(pageId);
+  page?.classList.remove("page-enter");
+  requestAnimationFrame(() => page?.classList.add("page-enter"));
+  window.setTimeout(() => page?.classList.remove("page-enter"), 350);
 }
 
 window.addEventListener("popstate", () => {
   const view = window.location.hash.slice(1);
-  activeWorkspaceView = WORKSPACE_VIEWS.includes(view) ? view : "sharing";
+  const nextView = WORKSPACE_VIEWS.includes(view) ? view : "sharing";
+  if (activeWorkspaceView !== nextView) preserveWorkspaceScroll(nextView);
+  activeWorkspaceView = nextView;
   updateUI();
 });
+
+function preserveWorkspaceScroll(view) {
+  const pageIds = {
+    sharing: "workspaceScreen",
+    transfers: "transfersScreen",
+    scratchpad: "scratchpadScreen",
+    connect: "connectScreen",
+    controls: "connectScreen",
+    devices: "devicesScreen"
+  };
+  const currentPage = document.getElementById(pageIds[activeWorkspaceView]);
+  const nextPage = document.getElementById(pageIds[view]);
+  if (!currentPage || !nextPage) return;
+  if (window.scrollY <= 0) {
+    nextPage.style.minHeight = "";
+    return;
+  }
+
+  const pageTop = currentPage.getBoundingClientRect().top + window.scrollY;
+  const neededHeight = window.scrollY + window.innerHeight - pageTop + 8;
+  nextPage.style.minHeight = `${Math.max(0, neededHeight)}px`;
+}
 
 function updateUI() {
   const isLaptop = STATE.role === "laptop";

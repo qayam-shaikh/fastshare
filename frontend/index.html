@@ -310,12 +310,34 @@
             <span><strong>Control laptop</strong><small>Only available after laptop approval</small></span>
           </summary>
           <div class="remote-actions">
-            <button type="button" class="btn btn-primary btn-sm" onclick="viewLaptopScreen()">View laptop screen</button>
-            <button type="button" class="btn btn-outline btn-sm" onclick="remoteAction('media-toggle')">Play / Pause</button>
-            <button type="button" class="btn btn-outline btn-sm" onclick="remoteAction('volume-down')">Volume −</button>
-            <button type="button" class="btn btn-outline btn-sm" onclick="remoteAction('volume-up')">Volume +</button>
-            <button type="button" class="btn btn-outline btn-sm" onclick="remoteAction('slide-previous')">← Previous slide</button>
-            <button type="button" class="btn btn-outline btn-sm" onclick="remoteAction('slide-next')">Next slide →</button>
+            <button type="button" class="remote-screen-action" onclick="viewLaptopScreen()">
+              <span class="remote-action-icon" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+              </span>
+              <span class="remote-screen-label">View laptop screen<small>Capture the current display</small></span>
+              <span class="remote-screen-arrow" aria-hidden="true">→</span>
+            </button>
+            <section class="remote-control-group">
+              <h3>Media</h3>
+              <button type="button" class="remote-control-button remote-media-button" onclick="remoteAction('media-toggle')">
+                <span class="remote-control-icon" aria-hidden="true">▶</span>
+                <span>Play / Pause</span>
+              </button>
+            </section>
+            <section class="remote-control-group">
+              <h3>Volume</h3>
+              <div class="remote-control-pair">
+                <button type="button" class="remote-control-button" onclick="remoteAction('volume-down')"><span class="remote-control-icon" aria-hidden="true">−</span><span>Volume down</span></button>
+                <button type="button" class="remote-control-button" onclick="remoteAction('volume-up')"><span class="remote-control-icon" aria-hidden="true">+</span><span>Volume up</span></button>
+              </div>
+            </section>
+            <section class="remote-control-group">
+              <h3>Presentation</h3>
+              <div class="remote-control-pair">
+                <button type="button" class="remote-control-button" onclick="remoteAction('slide-previous')"><span class="remote-control-icon" aria-hidden="true">←</span><span>Previous</span></button>
+                <button type="button" class="remote-control-button" onclick="remoteAction('slide-next')"><span class="remote-control-icon" aria-hidden="true">→</span><span>Next</span></button>
+              </div>
+            </section>
           </div>
           <img id="remoteScreenPreview" class="remote-screen-preview" alt="Latest laptop screenshot" hidden onclick="openLightbox(this.src)">
           <p id="remoteActionStatus" class="remote-action-status" role="status"></p>
