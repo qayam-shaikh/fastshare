@@ -1,13 +1,23 @@
 # QuickShare LAN
 
-QuickShare is an on-demand, **two-way** file and text sharing web app for an Ubuntu laptop and a phone on the same Wi-Fi network. It requires no background service, cloud account, or mobile app install.
+QuickShare is an on-demand, **two-way** file and text sharing web app for an Ubuntu laptop and a phone on the same Wi-Fi network.
 
-## Project Structure (Separated Frontend & Backend)
+## Wi-Fi Independent Bookmark URLs (No Hardcoded IP)
+
+QuickShare binds to port `8765` and automatically uses **mDNS (`.local` ZeroConf/Avahi)** so your bookmark URLs stay the same even when you connect to a different Wi-Fi network or hotspot:
+
+- **Laptop URL:** `http://localhost:8765/laptop` (or `http://quickshare.local:8765/laptop`)
+- **Phone URL:** `http://quickshare.local:8765/phone` (or `http://<your-ubuntu-hostname>.local:8765/phone`)
+- **Fallback IP URL:** `http://<current-wifi-ip>:8765/phone` (also shown in the UI in case a guest router blocks `.local` multicast)
+
+> **Tip for `quickshare.local` on Ubuntu:** If `avahi-utils` is installed (`sudo apt install avahi-utils`), QuickShare automatically publishes the `quickshare.local` alias on your active Wi-Fi IP while the app is running. Otherwise, it automatically falls back to your laptop's built-in Ubuntu mDNS name (`http://<your-hostname>.local:8765/phone`).
+
+## Project Structure
 
 ```text
 fastshare-main/
 ├── quickshare              # CLI launcher script
-├── quickshare.py           # Pure Python HTTP/REST backend server
+├── quickshare.py           # Pure Python HTTP/REST backend server + mDNS publisher
 ├── frontend/
 │   ├── index.html          # Semantic HTML layout (Home + Bento Workspace)
 │   ├── styles.css          # Responsive Bento grid & Light/Dark design system
@@ -15,13 +25,3 @@ fastshare-main/
 ├── requirements.txt
 └── .quickshare_vendor/     # Vendored QR code generator
 ```
-
-## Key Features
-
-- **Consistent Static URL (`http://<laptop-ip>:8765/share`):** Uses port `8765` and fixed paths (`/app` on laptop, `/share` on phone) so you can bookmark the phone URL once and open it anytime without scanning—while still keeping the QR code available on screen.
-- **Two-Way Sharing in a Single Session:** Start from either **Send to Phone** or **Receive from Phone** and freely share items both ways in the same session.
-- **Smart Interactive Cards (No Forced Auto-Downloads):**
-  - **Text:** Displays text with a **Copy to Clipboard** button, or a **Download `.txt`** board if the text exceeds 2,000 characters.
-  - **Images:** Displays an inline **image preview** (with click-to-zoom lightbox) and a **Download Image** button.
-  - **ZIP & Folders:** Automatically compresses uploaded folders into a `.zip` archive and shows a **ZIP icon**, archive name, size, and **Download ZIP** button.
-  - **Files:** Shows a **file icon**, file name, size, and **Download File** button.

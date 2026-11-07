@@ -1,11 +1,13 @@
 /* QuickShare Frontend Application (Separated from Python Backend) */
 const STATE = window.__INITIAL_STATE__ || {
   role: "laptop",
-  basePath: "/app",
+  basePath: "/laptop",
   screen: "home",
   initialFocus: "send",
   phoneConnected: false,
-  phoneUrl: "http://192.168.1.10:8765/share",
+  phoneUrl: "http://quickshare.local:8765/phone",
+  phoneIpUrl: "http://192.168.0.103:8765/phone",
+  laptopUrl: "http://localhost:8765/laptop",
   qrDataUri: "",
   maxUploadMib: 500,
   remainingSeconds: 3600,
@@ -372,6 +374,12 @@ function updateUI() {
 
   const homeUrlEl = document.getElementById("homePhoneUrl");
   if (homeUrlEl) homeUrlEl.textContent = STATE.phoneUrl || "";
+  const homeLapEl = document.getElementById("homeLaptopUrl");
+  if (homeLapEl) homeLapEl.textContent = STATE.laptopUrl || "http://localhost:8765/laptop";
+  const lapUrlEl = document.getElementById("laptopUrlText");
+  if (lapUrlEl) lapUrlEl.textContent = STATE.laptopUrl || "http://localhost:8765/laptop";
+  const ipUrlEl = document.getElementById("phoneIpUrlText");
+  if (ipUrlEl) ipUrlEl.textContent = STATE.phoneIpUrl || "";
 
   // Connection badge
   const badge = document.getElementById("connectionBadge");

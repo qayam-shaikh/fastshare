@@ -128,14 +128,20 @@
           </div>
         </div>
 
-        <!-- Static URL Quick Bar on Home Screen -->
+        <!-- Wi-Fi Independent Bookmark Bar on Home Screen -->
         <div class="home-quick-bar">
           <div class="quick-bar-left">
-            <span class="quick-bar-label">Static Phone URL (Bookmark once):</span>
-            <code class="quick-bar-url" id="homePhoneUrl"></code>
+            <div class="quick-bar-item">
+              <span class="quick-bar-label">Phone Bookmark (Works on any Wi-Fi):</span>
+              <code class="quick-bar-url" id="homePhoneUrl"></code>
+            </div>
+            <div class="quick-bar-item">
+              <span class="quick-bar-label">Laptop Bookmark:</span>
+              <code class="quick-bar-url" id="homeLaptopUrl">http://localhost:8765/laptop</code>
+            </div>
           </div>
           <div class="quick-bar-actions">
-            <button type="button" class="btn btn-outline btn-sm" onclick="copyTextWithFallback(STATE.phoneUrl, this)">Copy URL</button>
+            <button type="button" class="btn btn-outline btn-sm" onclick="copyTextWithFallback(STATE.phoneUrl, this)">Copy Phone URL</button>
           </div>
         </div>
       </div>
@@ -253,7 +259,7 @@
                 <button type="button" class="btn btn-outline btn-xs" onclick="toggleQrPanel()">Hide</button>
               </div>
               <p class="qr-banner-desc">
-                Your phone URL stays the same every time. Bookmark it once to connect without scanning, or scan the QR code on the left.
+                Uses your laptop's <strong>.local mDNS name</strong> so the URL stays identical even when you switch Wi-Fi networks:
               </p>
               <div class="url-copy-bar">
                 <code class="url-text" id="phoneUrlText"></code>
@@ -261,6 +267,10 @@
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                   <span>Copy URL</span>
                 </button>
+              </div>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:7px;font-size:0.74rem;color:var(--text-muted)">
+                <span>Laptop: <code id="laptopUrlText" style="color:var(--text-secondary)">http://localhost:8765/laptop</code></span>
+                <span>IP Fallback: <code id="phoneIpUrlText" style="color:var(--text-secondary)"></code></span>
               </div>
             </div>
           </div>

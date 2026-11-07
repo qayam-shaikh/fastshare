@@ -527,10 +527,17 @@ button,
   min-width: 0;
 }
 
+.quick-bar-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .quick-bar-label {
   font-size: 0.82rem;
   font-weight: 650;
   color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .quick-bar-url {
@@ -541,6 +548,7 @@ button,
   padding: 3px 8px;
   border-radius: 6px;
   border: 1px solid var(--border-color);
+  white-space: nowrap;
 }
 
 /* =========================================================
@@ -726,6 +734,7 @@ button,
   border: 1.5px dashed var(--border-strong);
   border-radius: var(--radius-md);
   padding: 12px;
+  min-height: 88px;
   background: var(--bg-subtle);
   color: var(--text-secondary);
   font-size: 0.81rem;

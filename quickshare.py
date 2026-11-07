@@ -70,6 +70,54 @@ def private_ipv4_addresses() -> list[str]:
     return [ip for ip in preferred if ip in usable] + sorted(usable - set(preferred))
 
 
+
+
+def get_system_mdns_hostname() -> str:
+    raw = socket.gethostname().split(".")[0].strip()
+    cleaned = "".join(c if c.isalnum() or c == "-" else "-" for c in raw).strip("-")
+    return f"{cleaned or 'laptop'}.local"
+
+
+class MdnsPublisher:
+    """Publishes quickshare.local via avahi-publish on Ubuntu if available."""
+
+    def __init__(self, bind_ip: str, alias: str = "quickshare.local") -> None:
+        self.bind_ip = bind_ip
+        self.mdns_host = get_system_mdns_hostname()
+        self.alias = alias
+        self.proc: subprocess.Popen | None = None
+        self.active_hostname: str = get_system_mdns_hostname()
+
+    def start(self) -> str:
+        cmd = shutil.which("avahi-publish")
+        if cmd:
+            try:
+                self.proc = subprocess.Popen(
+                    [cmd, "-a", "-R", self.alias, self.bind_ip],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                time.sleep(0.15)
+                if self.proc.poll() is None:
+                    self.active_hostname = self.alias
+                    return self.active_hostname
+            except OSError:
+                self.proc = None
+        return self.active_hostname
+
+    def stop(self) -> None:
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=1.5)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+        self.proc = None
+
+
 def safe_name(name: str, fallback: str = "upload") -> str:
     name = Path(name).name.replace("\x00", "").strip()
     name = "".join(
@@ -166,6 +214,7 @@ class ShareState:
         # Fixed URL path by default so the phone URL stays identical across launches
         self.phone_token: str = secrets.token_urlsafe(16) if use_random else "" 
         self.bind_ip = bind_ip
+        self.mdns_host = getattr(args, "mdns_host", "") or get_system_mdns_hostname()
         self.started = time.monotonic()
         self.minutes = args.minutes
         self.max_upload = args.max_upload_mib * MIB
@@ -421,13 +470,28 @@ class Handler(BaseHTTPRequestHandler):
             "::1",
         )
 
+    def is_private_client(self) -> bool:
+        try:
+            addr = ipaddress.ip_address(self.client_address[0])
+            return addr.is_private or addr.is_loopback
+        except ValueError:
+            return False
+
     def admin_path(self) -> str:
         tok = self.server.state.admin_token
-        return f"/app/{tok}" if tok else "/app"
+        return f"/laptop/{tok}" if tok else "/laptop"
 
     def phone_path(self) -> str:
         tok = self.server.state.phone_token
-        return f"/share/{tok}" if tok else "/share"
+        return f"/phone/{tok}" if tok else "/phone"
+
+    def _normalize_alias_path(self, path: str) -> str:
+        # Support both /laptop and legacy /app, and both /phone and legacy /share
+        if path == "/app" or path.startswith("/app/"):
+            return "/laptop" + path[len("/app"):]
+        if path == "/share" or path.startswith("/share/"):
+            return "/phone" + path[len("/share"):]
+        return path
 
     def is_admin(self, path: str) -> bool:
         return self.is_laptop() and (
@@ -435,8 +499,10 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def is_phone(self, path: str) -> bool:
-        return self.server.state.phone_token is not None and (
-            path == self.phone_path() or path.startswith(self.phone_path() + "/")
+        return (
+            self.is_private_client()
+            and self.server.state.phone_token is not None
+            and (path == self.phone_path() or path.startswith(self.phone_path() + "/"))
         )
 
     def wants_json(self) -> bool:
@@ -491,6 +557,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         while "//" in path:
             path = path.replace("//", "/")
+        path = self._normalize_alias_path(path)
 
         if path.startswith("/static/"):
             return self.serve_static_asset(path[len("/static/"):])
@@ -535,6 +602,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         while "//" in path:
             path = path.replace("//", "/")
+        path = self._normalize_alias_path(path)
 
         if self.is_admin(path):
             return self.handle_admin_post(path[len(self.admin_path()) :])
@@ -595,6 +663,8 @@ class Handler(BaseHTTPRequestHandler):
                 "initial_focus": state.initial_focus,
                 "phone_connected": state.phone_connected,
                 "phone_url": self.phone_url(),
+                "phone_ip_url": self.phone_ip_url(),
+                "laptop_url": self.laptop_url(),
                 "remaining_seconds": state.remaining_seconds(),
                 "items": items_data,
             }
@@ -781,7 +851,13 @@ class Handler(BaseHTTPRequestHandler):
                 return ""
 
     def phone_url(self) -> str:
+        return f"http://{self.server.state.mdns_host}:{self.server.server_port}{self.phone_path()}"
+
+    def phone_ip_url(self) -> str:
         return f"http://{self.server.state.bind_ip}:{self.server.server_port}{self.phone_path()}"
+
+    def laptop_url(self) -> str:
+        return f"http://localhost:{self.server.server_port}{self.admin_path()}"
 
     def serve_static_asset(self, filename: str) -> None:
         frontend_dir = Path(__file__).with_name("frontend")
@@ -823,6 +899,8 @@ class Handler(BaseHTTPRequestHandler):
             "initialFocus": state.initial_focus,
             "phoneConnected": state.phone_connected,
             "phoneUrl": phone_link,
+            "phoneIpUrl": self.phone_ip_url(),
+            "laptopUrl": self.laptop_url(),
             "qrDataUri": qr_uri,
             "maxUploadMib": state.max_upload // MIB,
             "remainingSeconds": state.remaining_seconds(),
@@ -896,20 +974,25 @@ def main() -> int:
         parser.error("--bind must be an IPv4 address")
 
     with tempfile.TemporaryDirectory(prefix="quickshare-") as work:
+        mdns = MdnsPublisher(bind_ip, alias="quickshare.local")
+        args.mdns_host = mdns.start()
         state = ShareState(args, bind_ip, Path(work))
+        listen_host = args.bind if args.bind else "0.0.0.0"
         try:
-            server = QuickShareServer((bind_ip, args.port), state)
+            server = QuickShareServer((listen_host, args.port), state)
         except OSError:
-            server = QuickShareServer((bind_ip, 0), state)
-        admin_route = f"/app/{state.admin_token}" if state.admin_token else "/app"
-        phone_route = f"/share/{state.phone_token}" if state.phone_token else "/share"
-        url = f"http://{bind_ip}:{server.server_port}{admin_route}"
-        phone_url = f"http://{bind_ip}:{server.server_port}{phone_route}"
+            server = QuickShareServer((listen_host, 0), state)
+        admin_route = f"/laptop/{state.admin_token}" if state.admin_token else "/laptop"
+        phone_route = f"/phone/{state.phone_token}" if state.phone_token else "/phone"
+        laptop_url = f"http://localhost:{server.server_port}{admin_route}"
+        laptop_mdns_url = f"http://{state.mdns_host}:{server.server_port}{admin_route}"
+        phone_url = f"http://{state.mdns_host}:{server.server_port}{phone_route}"
+        phone_ip_url = f"http://{bind_ip}:{server.server_port}{phone_route}"
         print(
-            "QuickShare is running (two-way session, no background service).\nLaptop URL:",
-            url,
-            "\nPhone URL (same every time — bookmark it!):",
-            phone_url,
+            "QuickShare is running (two-way session, no background service)."
+            f"\n  Laptop URL (Wi-Fi independent): {laptop_url}  (or {laptop_mdns_url})"
+            f"\n  Phone URL  (Wi-Fi independent): {phone_url}"
+            f"\n  Phone Fallback IP URL:          {phone_ip_url}"
             "\nPress Ctrl+C to stop.",
             flush=True,
         )
@@ -923,11 +1006,12 @@ def main() -> int:
             timer.start()
         try:
             if not args.no_browser:
-                webbrowser.open(url)
+                webbrowser.open(laptop_url)
             server.serve_forever(poll_interval=0.5)
         except KeyboardInterrupt:
             print("\nStopping QuickShare…")
         finally:
+            mdns.stop()
             server.server_close()
             if timer:
                 timer.cancel()
