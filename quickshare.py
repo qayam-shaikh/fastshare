@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""QuickShare LAN — A two-way, token-protected Ubuntu-to-Mobile file & text sharing web app."""
+"""QuickShare LAN — A two-way, token-protected laptop-to-phone sharing app."""
 from __future__ import annotations
 
 import argparse
 import base64
 import cgi
+import ctypes
 import errno
 import hashlib
 import hmac
@@ -51,6 +52,13 @@ ALREADY_COMPRESSED_EXTENSIONS = {
     ".jpg", ".jxl", ".m4a", ".m4v", ".mkv", ".mov", ".mp3", ".mp4", ".mpeg",
     ".mpg", ".odp", ".ods", ".odt", ".ogg", ".opus", ".pdf", ".png", ".pptx",
     ".rar", ".webm", ".webp", ".woff", ".woff2", ".xlsx", ".xz", ".zip", ".zst",
+}
+WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+    *(f"COM{digit}" for digit in "¹²³"),
+    *(f"LPT{digit}" for digit in "¹²³"),
 }
 
 
@@ -102,8 +110,83 @@ def get_system_mdns_hostname() -> str:
     return f"{cleaned or 'laptop'}.local"
 
 
+def default_trusted_devices_path() -> Path:
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        return base / "QuickShare" / "trusted_devices.json"
+    return Path.home() / ".config" / "quickshare" / "trusted_devices.json"
+
+
+def windows_remote_key_code(action: str) -> int | None:
+    return {
+        "media-toggle": 0xB3,  # VK_MEDIA_PLAY_PAUSE
+        "volume-down": 0xAE,  # VK_VOLUME_DOWN
+        "volume-up": 0xAF,  # VK_VOLUME_UP
+        "slide-previous": 0x25,  # VK_LEFT
+        "slide-next": 0x27,  # VK_RIGHT
+    }.get(action)
+
+
+def send_windows_remote_key(action: str) -> bool:
+    key_code = windows_remote_key_code(action)
+    if key_code is None:
+        return False
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.keybd_event(key_code, 0, 0, 0)
+    user32.keybd_event(key_code, 0, 0x0002, 0)
+    return True
+
+
+def windows_clipboard_text() -> str | None:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    user32.OpenClipboard.restype = ctypes.c_int
+    user32.GetClipboardData.argtypes = [ctypes.c_uint]
+    user32.GetClipboardData.restype = ctypes.c_void_p
+    user32.CloseClipboard.argtypes = []
+    user32.CloseClipboard.restype = ctypes.c_int
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.restype = ctypes.c_int
+
+    if not user32.OpenClipboard(None):
+        return None
+    try:
+        handle = user32.GetClipboardData(13)  # CF_UNICODETEXT
+        if not handle:
+            return None
+        data = kernel32.GlobalLock(handle)
+        if not data:
+            return None
+        try:
+            return ctypes.wstring_at(data)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
+
+
+def capture_laptop_screenshot(destination: Path, command: list[str] | None) -> None:
+    if os.name == "nt":
+        from PIL import ImageGrab
+
+        ImageGrab.grab(all_screens=True).save(destination, format="PNG")
+        return
+    if command is None:
+        raise RuntimeError("No Linux screenshot utility is available.")
+    subprocess.run(
+        [*command, str(destination)],
+        check=True,
+        capture_output=True,
+        timeout=15,
+    )
+
+
 class MdnsPublisher:
-    """Publishes quickshare.local via avahi-publish on Ubuntu if available."""
+    """Publishes quickshare.local with Avahi or the cross-platform Zeroconf library."""
 
     def __init__(self, bind_ip: str, alias: str = "quickshare.local") -> None:
         self.bind_ip = bind_ip
@@ -111,8 +194,11 @@ class MdnsPublisher:
         self.alias = alias
         self.proc: subprocess.Popen | None = None
         self.active_hostname: str = get_system_mdns_hostname()
+        self.zeroconf = None
+        self.service_info = None
+        self.warning = ""
 
-    def start(self) -> str:
+    def start(self, port: int | None = None) -> str:
         cmd = shutil.which("avahi-publish")
         if cmd:
             try:
@@ -127,6 +213,32 @@ class MdnsPublisher:
                     return self.active_hostname
             except OSError:
                 self.proc = None
+
+        if port is not None:
+            try:
+                    from zeroconf import Error as ZeroconfError
+                    from zeroconf import ServiceInfo, Zeroconf
+            except ImportError as error:
+                    self.warning = f"Could not load mDNS support: {error}"
+                    return self.active_hostname
+
+            try:
+                    self.zeroconf = Zeroconf()
+                    self.service_info = ServiceInfo(
+                        "_http._tcp.local.",
+                        "QuickShare._http._tcp.local.",
+                        addresses=[socket.inet_aton(self.bind_ip)],
+                        port=port,
+                        server=f"{self.alias}.",
+                    )
+                    self.zeroconf.register_service(self.service_info)
+                    self.active_hostname = self.alias
+            except (OSError, ZeroconfError) as error:
+                    if self.zeroconf is not None:
+                        self.zeroconf.close()
+                        self.zeroconf = None
+                    self.service_info = None
+                    self.warning = f"Could not publish {self.alias}: {error}"
         return self.active_hostname
 
     def stop(self) -> None:
@@ -140,14 +252,24 @@ class MdnsPublisher:
                 except Exception:
                     pass
         self.proc = None
+        if self.zeroconf is not None:
+            if self.service_info is not None:
+                self.zeroconf.unregister_service(self.service_info)
+            self.zeroconf.close()
+            self.zeroconf = None
+            self.service_info = None
 
 
 def safe_name(name: str, fallback: str = "upload") -> str:
     name = Path(name).name.replace("\x00", "").strip()
-    name = "".join(
+    cleaned = "".join(
         char if char.isalnum() or char in " ._-()[]" else "_" for char in name
     ).strip(" .")
-    return (name or fallback)[:180]
+    if not cleaned:
+        cleaned = fallback
+    if cleaned.split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES:
+        cleaned = f"_{cleaned}"
+    return cleaned[:180]
 
 
 def safe_relative_path(name: str) -> Path:
@@ -170,6 +292,9 @@ def unique_path(directory: Path, filename: str) -> Path:
 
 
 def clipboard_text() -> str | None:
+    if os.name == "nt":
+        return windows_clipboard_text()
+
     for command in (
         ("wl-paste", "--no-newline"),
         ("xclip", "-selection", "clipboard", "-o"),
@@ -282,7 +407,7 @@ class ShareState:
             getattr(
                 args,
                 "trusted_devices_file",
-                Path.home() / ".config" / "quickshare" / "trusted_devices.json",
+                default_trusted_devices_path(),
             )
         ).expanduser()
         self.trusted_devices = self._load_trusted_devices()
@@ -399,7 +524,8 @@ class ShareState:
     def _save_trusted_devices(self) -> None:
         path = self.trusted_devices_path
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(path.parent, 0o700)
+        if os.name == "posix":
+            os.chmod(path.parent, 0o700)
         payload = json.dumps(
             {"version": 1, "devices": self.trusted_devices},
             ensure_ascii=False,
@@ -418,7 +544,8 @@ class ShareState:
                 temporary.write(payload)
                 temporary.flush()
                 os.fsync(temporary.fileno())
-            os.chmod(temporary_path, 0o600)
+            if os.name == "posix":
+                os.chmod(temporary_path, 0o600)
             temporary_path.replace(path)
         except OSError:
             if temporary_path is not None:
@@ -587,8 +714,13 @@ class ShareState:
     def add_clipboard(self) -> TransferItem:
         text = clipboard_text()
         if text is None or not text.strip():
+            hint = (
+                "Check that the Windows clipboard is available."
+                if os.name == "nt"
+                else "Install wl-clipboard, xclip, or xsel."
+            )
             raise ValueError(
-                "System clipboard is empty or unavailable. You can paste directly into the Text box instead, or install wl-clipboard / xclip / xsel."
+                f"System clipboard is empty or unavailable. You can paste directly into the Text box instead. {hint}"
             )
         return self.add_text_item("laptop", text, "clipboard.txt")
 
@@ -1238,6 +1370,20 @@ setInterval(checkApproval,1500);
         if action == "open-url":
             return self.handle_open_url()
 
+        if os.name == "nt":
+            try:
+                if not send_windows_remote_key(action):
+                    return self.deny(
+                        HTTPStatus.BAD_REQUEST, "Unknown remote-control action."
+                    )
+            except OSError as error:
+                return self.send_json(
+                    {"ok": False, "error": f"Could not send the remote key: {error}"},
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            self.send_json({"ok": True})
+            return
+
         commands = {
             "media-toggle": ("playerctl", ["play-pause"]),
             "volume-down": ("pactl", ["set-sink-volume", "@DEFAULT_SINK@", "-5%"]),
@@ -1325,16 +1471,17 @@ setInterval(checkApproval,1500);
     def serve_laptop_screenshot(self) -> None:
         state = self.server.state
         command: list[str] | None = None
-        for program, args in (
-            ("grim", []),
-            ("gnome-screenshot", ["-f"]),
-            ("scrot", []),
-        ):
-            executable = shutil.which(program)
-            if executable:
-                command = [executable, *args]
-                break
-        if command is None:
+        if os.name != "nt":
+            for program, args in (
+                ("grim", []),
+                ("gnome-screenshot", ["-f"]),
+                ("scrot", []),
+            ):
+                executable = shutil.which(program)
+                if executable:
+                    command = [executable, *args]
+                    break
+        if os.name != "nt" and command is None:
             return self.send_json(
                 {
                     "ok": False,
@@ -1347,13 +1494,19 @@ setInterval(checkApproval,1500);
             prefix="quickshare-screen-", suffix=".png", dir=state.work, delete=False
         ) as temporary:
             screenshot_path = Path(temporary.name)
-        command.append(str(screenshot_path))
         try:
-            subprocess.run(command, check=True, capture_output=True, timeout=15)
+            capture_laptop_screenshot(screenshot_path, command)
         except (OSError, subprocess.SubprocessError) as error:
             screenshot_path.unlink(missing_ok=True)
             self.send_json(
                 {"ok": False, "error": f"Could not capture the laptop screen: {error}"},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        except (ImportError, RuntimeError) as error:
+            screenshot_path.unlink(missing_ok=True)
+            self.send_json(
+                {"ok": False, "error": f"Could not load the screenshot dependency: {error}"},
                 status=HTTPStatus.SERVICE_UNAVAILABLE,
             )
             return
@@ -2230,7 +2383,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="quickshare-") as work:
         mdns = MdnsPublisher(bind_ip, alias="quickshare.local")
-        args.mdns_host = mdns.start()
+        args.mdns_host = mdns.active_hostname
         args.scheme = "https" if args.tls_cert else "http"
         state = ShareState(args, bind_ip, Path(work))
         try:
@@ -2255,6 +2408,8 @@ def main() -> int:
                 server.server_close()
                 parser.error(f"Could not load TLS certificate/key: {error}")
             server.socket = tls_context.wrap_socket(server.socket, server_side=True)
+        args.mdns_host = mdns.start(server.server_port)
+        state.mdns_host = args.mdns_host
         admin_route = f"/laptop/{state.admin_token}" if state.admin_token else "/laptop"
         phone_route = f"/phone/{state.phone_token}" if state.phone_token else "/phone"
         laptop_url = f"{state.scheme}://{state.mdns_host if state.scheme == 'https' else 'localhost'}:{server.server_port}{admin_route}"
@@ -2268,6 +2423,8 @@ def main() -> int:
             f"\n  Phone Fallback IP URL:          {phone_ip_url}"
             f"\n  Inbox directory:                 {Path.home() / 'QuickShare-Inbox'}"
         )
+        if mdns.warning:
+            startup_message += f"\n  Name discovery warning:         {mdns.warning}"
         if args.pin:
             startup_message += "\n  Phone access:                    PIN required"
         print(startup_message + "\nPress Ctrl+C to stop.", flush=True)

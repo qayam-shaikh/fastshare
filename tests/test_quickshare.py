@@ -1,12 +1,17 @@
 import json
+import os
+import socket
 import tempfile
 import threading
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from types import ModuleType
+from unittest.mock import Mock, call, patch
 from urllib import request, parse
 from urllib.error import HTTPError
 
+import quickshare
 from quickshare import QuickShareServer, ShareState
 
 
@@ -37,6 +42,95 @@ class QuickShareServerTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.temp_dir_context.cleanup()
+
+    def test_windows_profile_path_and_remote_key_mapping(self) -> None:
+        with patch("quickshare.sys.platform", "win32"), patch.dict(
+            "quickshare.os.environ", {"APPDATA": str(self.temp_dir / "Roaming")}
+        ):
+            self.assertEqual(
+                quickshare.default_trusted_devices_path(),
+                self.temp_dir / "Roaming" / "QuickShare" / "trusted_devices.json",
+            )
+
+        self.assertEqual(quickshare.windows_remote_key_code("media-toggle"), 0xB3)
+        self.assertEqual(quickshare.windows_remote_key_code("volume-down"), 0xAE)
+        self.assertEqual(quickshare.windows_remote_key_code("volume-up"), 0xAF)
+        self.assertEqual(quickshare.windows_remote_key_code("slide-previous"), 0x25)
+        self.assertEqual(quickshare.windows_remote_key_code("slide-next"), 0x27)
+        self.assertIsNone(quickshare.windows_remote_key_code("unknown"))
+        self.assertEqual(quickshare.safe_name("CON.txt"), "_CON.txt")
+        self.assertEqual(quickshare.safe_name("LPT1"), "_LPT1")
+
+    def test_mdns_publishes_stable_alias_and_unregisters_it(self) -> None:
+        zeroconf_module = ModuleType("zeroconf")
+        zeroconf_module.ServiceInfo = Mock()
+        zeroconf_module.Zeroconf = Mock()
+        zeroconf_module.Error = type("ZeroconfError", (Exception,), {})
+        with patch("quickshare.shutil.which", return_value=None), patch.dict(
+            "sys.modules", {"zeroconf": zeroconf_module}
+        ):
+            publisher = quickshare.MdnsPublisher("192.168.1.10")
+            self.assertEqual(publisher.start(8765), "quickshare.local")
+            zeroconf_module.ServiceInfo.assert_called_once_with(
+                "_http._tcp.local.",
+                "QuickShare._http._tcp.local.",
+                addresses=[socket.inet_aton("192.168.1.10")],
+                port=8765,
+                server="quickshare.local.",
+            )
+            publisher.stop()
+
+        zeroconf = zeroconf_module.Zeroconf.return_value
+        zeroconf.unregister_service.assert_called_once_with(
+            zeroconf_module.ServiceInfo.return_value
+        )
+        zeroconf.close.assert_called_once_with()
+
+    def test_windows_remote_key_sends_press_and_release(self) -> None:
+        with patch("quickshare.ctypes.WinDLL", create=True) as win_dll:
+            self.assertTrue(quickshare.send_windows_remote_key("slide-next"))
+
+        user32 = win_dll.return_value
+        self.assertEqual(
+            user32.keybd_event.call_args_list,
+            [
+                call(0x27, 0, 0, 0),
+                call(0x27, 0, 0x0002, 0),
+            ],
+        )
+
+    def test_windows_clipboard_reads_unicode_text_and_releases_handles(self) -> None:
+        user32 = Mock()
+        kernel32 = Mock()
+        user32.OpenClipboard.return_value = 1
+        user32.GetClipboardData.return_value = 12
+        kernel32.GlobalLock.return_value = 34
+        with patch(
+            "quickshare.ctypes.WinDLL", create=True, side_effect=[user32, kernel32]
+        ), patch("quickshare.ctypes.wstring_at", return_value="clipboard text"):
+            self.assertEqual(quickshare.windows_clipboard_text(), "clipboard text")
+
+        kernel32.GlobalUnlock.assert_called_once_with(12)
+        user32.CloseClipboard.assert_called_once_with()
+
+    def test_windows_clipboard_uses_native_reader(self) -> None:
+        with patch("quickshare.os.name", "nt"), patch(
+            "quickshare.windows_clipboard_text", return_value="clipboard text"
+        ) as read_clipboard:
+            self.assertEqual(quickshare.clipboard_text(), "clipboard text")
+        read_clipboard.assert_called_once_with()
+
+    def test_windows_screenshot_uses_pillow(self) -> None:
+        from PIL import ImageGrab
+
+        destination = self.temp_dir / "screenshot.png"
+        with patch("quickshare.os.name", "nt"), patch.object(
+            ImageGrab, "grab"
+        ) as capture:
+            quickshare.capture_laptop_screenshot(destination, None)
+
+        capture.assert_called_once_with(all_screens=True)
+        capture.return_value.save.assert_called_once_with(destination, format="PNG")
 
     def request(self, path: str, *, method: str = "GET", data: bytes | None = None, headers: dict | None = None, cookie: str | None = None):
         req = request.Request(self.base_url + path, data=data, headers=headers or {}, method=method)
@@ -117,7 +211,8 @@ class QuickShareServerTests(unittest.TestCase):
 
         fingerprint = self.state._device_fingerprint(device_token)
         self.assertTrue(self.args.trusted_devices_file.exists())
-        self.assertEqual(self.args.trusted_devices_file.stat().st_mode & 0o777, 0o600)
+        if os.name == "posix":
+            self.assertEqual(self.args.trusted_devices_file.stat().st_mode & 0o777, 0o600)
         self.assertEqual(len(self.state.trusted_phone_devices()), 1)
 
         restarted_state = ShareState(self.args, "127.0.0.1", self.temp_dir)

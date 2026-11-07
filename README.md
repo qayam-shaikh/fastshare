@@ -1,131 +1,250 @@
-# QuickShare LAN
+# QuickShare
 
-QuickShare is an on-demand, **two-way** file and text sharing web app for an Ubuntu laptop and a phone on the same Wi-Fi network.
+QuickShare is a private, two-way file and text sharing app for an **Ubuntu or Windows laptop** and an **Android phone** on the same local network. It runs on demand, serves its interface from the laptop, and does not send files through a cloud service.
 
-## Setup and start
+## Screenshots
 
-Requirements: Ubuntu/Linux, Python 3, and a phone and laptop on the same Wi-Fi network. From a terminal in the cloned repository:
+### Laptop
 
-```sh
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-./quickshare
+![QuickShare running on a laptop](docs/screenshots/laptop-share.png)
+
+### Android phone
+
+![QuickShare Controls page at a phone-sized viewport](docs/screenshots/mobile-controls.png)
+
+## What you can do
+
+- Send files, photos, text, links, and folders between the laptop and phone. Folders are packaged as ZIP files.
+- Take a photo with the phone camera or record and send a voice note.
+- Browse a shared ZIP archive and download just one file, or download multiple received items together.
+- Preview supported documents and code, and play shared audio and video.
+- Use the live Scratchpad to keep a note synchronized between devices.
+- From the phone, open a shared link on the laptop, request a laptop screenshot, control media and volume, or move presentation slides.
+- Approve a phone once or remember it on the laptop for future sessions; remove remembered devices at any time.
+- Optionally make shared text disappear after it is copied or downloaded once.
+- Optionally protect phone access with a PIN or save received files to an inbox.
+
+## Requirements
+
+- An Ubuntu 22.04+ or Windows 10/11 laptop with Python **3.10 or newer**.
+- An Android phone with a current browser such as Chrome.
+- Both devices connected to the same Wi-Fi or local network. Guest Wi-Fi and some mesh/router settings isolate devices; see [Troubleshooting](#troubleshooting) if the phone cannot connect.
+- Internet access for the initial Python dependency installation. The app itself works locally after setup.
+
+## Install and start
+
+Choose **one** of the laptop setup guides below. QuickShare creates a temporary session when launched; it does not install a background service.
+
+### Windows 10/11
+
+1. Install Python 3.10 or newer from [python.org/downloads/windows](https://www.python.org/downloads/windows/). In the installer, enable **Add python.exe to PATH** and include the **Python Launcher** if offered.
+2. Download the project:
+   - To use Git, open PowerShell and run:
+
+     ```powershell
+     git clone https://github.com/qayam-shaikh/fastshare.git
+     cd fastshare
+     ```
+
+   - Or use GitHub’s **Code → Download ZIP**, then extract the ZIP.
+3. Start QuickShare by double-clicking `quickshare.bat` in the project folder. On its first launch, the script creates a local `.venv` and installs the required packages. Later launches reuse that environment.
+4. If Windows prompts about Windows Defender Firewall, allow Python on **Private networks only**. Do not enable access on public networks.
+5. Keep the console window open while sharing. It prints the phone URL and a QR code. Scan the code or enter the printed phone URL in Chrome on Android.
+
+You can also launch from PowerShell in the project folder:
+
+```powershell
+.\quickshare.bat --pin 1234
 ```
 
-The terminal prints the laptop and phone URLs and a QR code. Scan the QR code or open the phone URL on your phone. If the phone cannot connect, use the displayed IP fallback and check that the laptop firewall allows the selected QuickShare port (default `8765`) on your trusted local network. Run `./quickshare --help` to see options; press `Ctrl+C` or use **Stop Session** to end sharing.
+The batch file passes command-line options through to the app. To install or refresh dependencies yourself:
 
-Choose **Send to Phone** or **Receive from Phone** on the laptop. Both devices can send and receive throughout the active session. Files are held in the local session and cleared when the session ends; QuickShare does not upload them to a cloud service.
-
-## Navigate the app
-
-The workspace is split into focused pages so the sharing controls, transfer feed, scratchpad, and connection tools are not all shown together:
-
-- **Share**: choose files, images, folders, camera capture, or text to send.
-- **Transfers**: review shared items, preview supported files, and download items.
-- **Scratchpad**: collaborate on a live-synced note.
-- **Connect** on the laptop: scan the QR code or copy the phone link. On the phone, this page is **Controls** for laptop screenshots, media, volume, and slides.
-- **Devices** on the laptop: approve new phones and manage remembered devices.
-
-Pages have bookmarkable in-app URLs and support browser back/forward navigation. On a phone, the page navigation adapts to its available actions.
-
-## Wi-Fi Independent Bookmark URLs (No Hardcoded IP)
-
-QuickShare binds to port `8765` and automatically uses **mDNS (`.local` ZeroConf/Avahi)** so your bookmark URLs stay the same even when you connect to a different Wi-Fi network or hotspot:
-
-- **Laptop URL:** `http://localhost:8765/laptop` (or `http://quickshare.local:8765/laptop`)
-- **Phone URL:** `http://quickshare.local:8765/phone` (or `http://<your-ubuntu-hostname>.local:8765/phone`)
-- **Fallback IP URL:** `http://<current-wifi-ip>:8765/phone` (also shown in the UI in case a guest router blocks `.local` multicast)
-
-> **Tip for `quickshare.local` on Ubuntu:** If `avahi-utils` is installed (`sudo apt install avahi-utils`), QuickShare automatically publishes the `quickshare.local` alias on your active Wi-Fi IP while the app is running. Otherwise, it automatically falls back to your laptop's built-in Ubuntu mDNS name (`http://<your-hostname>.local:8765/phone`).
-
-## Paste screenshots from the clipboard
-
-On the Laptop Hub, copy a screenshot to the clipboard (for example with `PrtSc` or `Shift+PrtSc`) and press `Ctrl+V` anywhere on the page to upload it directly to the session. No need to save the screenshot as a file first. Regular text pasting is unchanged.
-
-## Links in shared text
-
-Shared text snippets automatically linkify web URLs, email addresses, and phone numbers. Tap a web link to open it in the mobile browser, an email address to compose a message, or a phone number to open the phone's dialer. The original text can still be copied with **Copy to Clipboard**.
-
-When a phone shares a text snippet containing a web URL, the laptop feed also offers **Open Tab on Laptop**. It opens the validated HTTP(S) link in the laptop's default browser.
-
-## Download received items together
-
-When at least two items have been received on a device, use **Download All (ZIP)** above the session feed to download them as one archive.
-
-## Preview documents and code
-
-Click a `.pdf`, `.md`, `.json`, or `.py` item in the session feed to preview it in a modal without downloading it. Text and code previews are displayed as plain text.
-
-## Live scratchpad and media previews
-
-Open **Scratchpad** to draft or paste text on either device; changes sync while the session is open. Received `.mp4`, `.webm`, `.mp3`, and `.wav` files have inline playback controls and still retain their download action in **Transfers**.
-
-## Phone capture, voice notes, and laptop controls
-
-- On the phone, tap **Snap Photo** to open the rear camera and upload the captured image.
-- Tap **Record voice note**, grant microphone access, then tap **Stop & send voice note** to upload the recording. Browser microphone APIs generally require QuickShare to be served over trusted HTTPS; the browser will also ask for microphone permission.
-- On the phone, open **Controls** to request a screenshot, toggle media playback, adjust volume, or move presentation slides. The corresponding desktop tools are optional: `grim` (Wayland), `gnome-screenshot` or `scrot` (screenshots), `playerctl` (media), `pactl` (volume), and `xdotool` (slides). The UI reports when a tool is unavailable. Screenshot capture depends on the laptop's active desktop session.
-- Shared folders are represented as ZIP archives. Use **Browse Contents** on a ZIP or folder card to inspect safe entries and download an individual file without downloading the whole archive.
-
-## Approve and remember phones
-
-On the laptop, open **Devices** from the page navigation to manage phone access. When a new phone connects, it waits for approval there:
-
-- Choose **Allow once** to authorize the phone only until QuickShare stops.
-- Choose **Remember** to allow that browser on future sessions. Saved trust is kept on the laptop in `~/.config/quickshare/trusted_devices.json` with restrictive file permissions; only a hash of the phone's browser token is stored.
-- Use **Forget device** in the laptop's **Remembered devices** list to revoke and remove a saved phone. A forgotten phone must be approved again.
-
-The phone's browser keeps its device token in a long-lived, HttpOnly cookie. Remembering therefore applies to the same browser profile and QuickShare site address. To keep trust when changing Wi-Fi, open QuickShare using its stable `.local` hostname rather than a changing fallback IP address. Clearing browser cookies/site data, using a different browser profile, or changing the site hostname/IP can require approval again. Use HTTPS on networks you do not trust; anyone with access to the phone's browser profile may use its remembered authorization.
-
-## Send one-time text
-
-Before sending a text snippet, optionally enable **Self-destruct after one use**. The item is removed from the session when the other device successfully copies it or downloads its text file. This is a convenience for transient sharing, not an encrypted vault: use a trusted network, and do not treat it as a substitute for end-to-end encryption or secure secret storage.
-
-## Send files directly from the terminal
-
-Pass one or more files or folders when launching QuickShare:
-
-```sh
-./quickshare send ~/Pictures/photo.png ~/Documents
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Files are pre-shared in the feed, and folders are packed into ZIP files. You can also pass paths without the `send` word.
+### Ubuntu 22.04+
 
-## Save received files to the laptop
+1. Install Python and virtual-environment support:
 
-On the Laptop Hub, use **Save to Inbox** on a received item to copy it directly into `~/QuickShare-Inbox` on the laptop, without downloading it through the browser.
+   ```bash
+   sudo apt update
+   sudo apt install python3 python3-venv
+   ```
 
-## Optional phone PIN and upload capacity
+   `avahi-utils` is optional. When installed, QuickShare uses Avahi to publish `quickshare.local`; otherwise its cross-platform mDNS library handles the alias:
 
-Start QuickShare with `--pin 1234` to require that four-digit PIN when a phone first opens the session. The browser remembers authorization for that session. Uploads show live transfer speed/ETA and available laptop disk space; requests are rejected if the upload limit or available storage would be exceeded.
+   ```bash
+   sudo apt install avahi-utils
+   ```
 
-## Transfer performance
+2. Clone the project and enter its folder:
 
-On Linux, file downloads use the kernel's `sendfile` path when available, with a buffered fallback for HTTPS and unsupported platforms. Folder uploads are packaged directly from the multipart temporary files instead of first expanding every file into another temporary directory. Folder ZIPs use fast compression for ordinary files and skip recompression for common media, image, and archive formats. Actual speeds still depend on the Wi-Fi link and device storage.
+   ```bash
+   git clone https://github.com/qayam-shaikh/fastshare.git
+   cd fastshare
+   ```
 
-## Install QuickShare on a phone
+3. Create and activate a virtual environment, then install the dependencies:
 
-The phone page provides installable-app icons, an Android share target for photos, video, audio, PDFs, links, and text, and an **Install App** button. Android browsers may show the install prompt or require choosing **Install app / Add to Home screen** from the browser menu. On iPhone or iPad, open the page in Safari, tap **Share**, then choose **Add to Home Screen**.
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   python -m pip install --upgrade pip
+   python -m pip install -r requirements.txt
+   ```
 
-Mobile browsers require a **trusted HTTPS origin** for PWA installation, service workers, and native share targets. QuickShare's default HTTP mode cannot provide those browser features; enable HTTPS with a certificate trusted by the phone:
+4. Start the app:
 
-```sh
-./quickshare --tls-cert /path/to/quickshare.crt --tls-key /path/to/quickshare.key
+   ```bash
+   ./quickshare
+   ```
+
+   Keep the terminal open while sharing. Scan the displayed QR code or open the printed phone URL on Android. If the launcher is not executable, run `chmod +x quickshare` once, then start it again.
+
+## Connect the phone
+
+1. Start QuickShare on the laptop and leave it running.
+2. Connect the phone to the same Wi-Fi network as the laptop.
+3. Scan the QR code shown on the laptop, or type the **Phone URL** printed in the terminal into the phone browser. The app also shows the current Wi-Fi IP as a fallback URL.
+4. On the laptop, open **Devices** and choose **Allow once** or **Remember** for the new phone. The phone loads the sharing interface after approval.
+5. Choose **Remember** to let that phone browser reconnect in later sessions. Remove access later from **Devices → Remembered devices → Forget device**.
+
+QuickShare attempts to publish the stable `quickshare.local` alias on both operating systems. Ubuntu uses Avahi when available and otherwise uses the included cross-platform mDNS library. If alias publishing fails, the app falls back to the laptop’s `.local` hostname. Some routers block mDNS; if neither hostname resolves on the phone, use the IP fallback printed by the app. The phone’s remembered authorization is tied to its browser cookie and the hostname used; clearing site data or changing the hostname can require approval again.
+
+Remembered-device data is stored in the laptop’s user profile: `~/.config/quickshare/trusted_devices.json` on Ubuntu or `%APPDATA%\QuickShare\trusted_devices.json` on Windows. The file stores token hashes, not the phone’s browser token.
+
+## How to use the app
+
+The laptop and phone have a focused page navigation bar:
+
+| Page | How to use it |
+| --- | --- |
+| **Share** | Choose Images, Files, or Folder; drag and drop files on the laptop; use **Snap Photo** or **Record voice note** on the phone; or send text, links, and code. |
+| **Transfers** | Review sent and received items, preview supported files, play media, download items, save received files to the laptop inbox, or use **Download All (ZIP)** when available. Choose **Browse Contents** on a ZIP to inspect it and download individual files. |
+| **Scratchpad** | Type on either device. The shared note synchronizes while the session is active. |
+| **Connect** (laptop) / **Controls** (phone) | On the laptop, display the QR code and phone links. On the phone, open a link on the laptop, view a laptop screenshot, control media and volume, or send previous/next presentation keys. |
+| **Devices** (laptop) | Approve new phones, remember trusted browsers, or forget saved devices. |
+
+### Sharing notes, links, and files
+
+- A link in shared text is clickable on the receiving device. When the phone shares an HTTP(S) link, **Open Tab on Laptop** opens it in the laptop’s default browser.
+- Enable **Self-destruct after one use** before sending sensitive text to remove it after the other device successfully copies it or downloads its text file. This is a convenience feature, not encryption or a secure vault.
+- On the laptop, press **Ctrl+V** to share a copied screenshot. Clipboard access can depend on the desktop environment; see [platform controls](#laptop-specific-controls).
+- Folder shares are ZIP archives. Browse their contents from the transfer card without downloading the whole archive.
+
+### Laptop-specific controls
+
+The main sharing, transfer, scratchpad, device approval, and phone-to-laptop browsing features work on both supported laptop operating systems. Optional desktop controls use platform-specific support:
+
+| Feature | Ubuntu | Windows |
+| --- | --- | --- |
+| Open a link | Opens in the default browser. | Opens in the default browser. |
+| Copy laptop clipboard text | Uses `wl-paste`, `xclip`, or `xsel` when installed. | Reads Unicode text through the native Windows clipboard. |
+| Capture laptop screen | Uses `grim`, `gnome-screenshot`, or `scrot`. | Uses Pillow’s Windows screen capture support, installed with the app dependencies. |
+| Play/pause, volume, and slides | Uses `playerctl`, `pactl`, and `xdotool`. Install the command you need; QuickShare reports when it is unavailable. | Sends media, volume, and arrow keys to the laptop’s active desktop session. The active application must respond to those keys. |
+
+On Ubuntu, for example, install commonly needed desktop tools with:
+
+```bash
+sudo apt install wl-clipboard playerctl pulseaudio-utils xdotool gnome-screenshot
 ```
 
-The certificate must be valid for the QuickShare `.local` hostname, and its issuing CA must be trusted by both devices. A self-signed certificate that has not been trusted will trigger browser warnings and will not enable PWA/share-target support. The **Install App** button explains the browser-specific next steps when an in-page install prompt is unavailable.
+You only need the tools for the controls you plan to use. Wayland desktops may need `grim` instead of `gnome-screenshot` or `scrot`. Screenshot capture requires an active, unlocked desktop session.
 
-## Project Structure
+### Phone camera, microphone, and home-screen install
+
+- **Snap Photo** opens the rear camera when supported by the browser. When the camera returns the captured image, upload begins automatically.
+- **Record voice note** requests microphone permission only after you start recording. Browser microphone APIs and installable web apps generally require a trusted HTTPS connection.
+- Android browsers may offer **Install App** or **Add to Home screen**. A trusted HTTPS certificate is needed for full PWA, service worker, and microphone support; ordinary sharing works over the default local HTTP session.
+- To enable HTTPS, provide a certificate valid for the laptop hostname and trusted by both devices:
+
+  ```bash
+  ./quickshare --tls-cert /path/to/quickshare.crt --tls-key /path/to/quickshare.key
+  ```
+
+  On Windows, pass certificate paths through the launcher, for example:
+
+  ```powershell
+  .\quickshare.bat --tls-cert "C:\certs\quickshare.crt" --tls-key "C:\certs\quickshare.key"
+  ```
+
+  An untrusted self-signed certificate will show browser warnings and will not enable secure browser features.
+
+## Useful launch options
+
+Pass options to `./quickshare` on Ubuntu or `quickshare.bat` on Windows:
+
+| Option | Example | Description |
+| --- | --- | --- |
+| `--pin PIN` | `--pin 1234` | Require a four-digit PIN when a phone joins the session. |
+| `--minutes N` | `--minutes 0` | Set the session duration in minutes. The default is 60; `0` runs until stopped. |
+| `--port N` | `--port 9000` | Use a particular port. Use `--port 0` to choose an available port. |
+| `--save-inbox` | `--save-inbox` | Save a copy of each incoming phone upload to `~/QuickShare-Inbox` (or `--inbox PATH`). |
+| `--max-upload-mib N` | `--max-upload-mib 1000` | Set the maximum upload request size in MiB. |
+| `--no-browser` | `--no-browser` | Do not automatically open the laptop page. |
+| `PATH...` | `./quickshare send ~/Pictures/photo.png` | Add files or folders to the session as it starts. |
+
+Use `./quickshare --help` on Ubuntu or `.\quickshare.bat --help` on Windows for the full list.
+
+## Privacy and network safety
+
+- QuickShare keeps transfer data in a temporary local session and removes it when the session ends. Files are not uploaded to a cloud service.
+- The default session expires after 60 minutes. Stop sooner with **Stop Session** on the laptop or `Ctrl+C` in the terminal.
+- A new phone needs laptop approval. **Allow once** lasts only for the current session; **Remember** stores a browser-token hash in the laptop user profile. The phone stores its authorization token in an HttpOnly browser cookie.
+- Default HTTP traffic is not encrypted. Use QuickShare only on a trusted private network; use HTTPS with a trusted certificate on networks you do not trust.
+- The app is designed for a laptop and phone on the same local network, not for exposing the port to the public internet.
+
+## Troubleshooting
+
+**The phone cannot open the link**
+
+1. Confirm both devices are on the same Wi-Fi and that guest/client isolation is disabled.
+2. Use the exact **Phone Fallback IP URL** printed in the laptop terminal.
+3. On Windows, set the Wi-Fi network profile to **Private** and allow Python through Windows Defender Firewall on private networks (including local network discovery if prompted). On Ubuntu, allow the selected port (default `8765`) on the trusted LAN.
+4. Temporarily disconnect a VPN if it routes local-network traffic away from Wi-Fi.
+
+**The `.local` hostname does not work**
+
+Use the printed IP URL instead. QuickShare tries Avahi or its cross-platform mDNS library to publish `quickshare.local`; if that fails, it displays the laptop hostname. Some routers block multicast name discovery even when file sharing over the IP works.
+
+**The phone says it is waiting for approval**
+
+Open **Devices** on the laptop and approve the pending phone. A phone using a different browser profile, cleared cookies, or a different saved hostname may need approval again.
+
+**A phone control is unavailable**
+
+QuickShare reports the missing desktop utility. Install the relevant Ubuntu tool from the [laptop-specific controls](#laptop-specific-controls) table. On Windows, make sure the laptop is awake and that the active player or presentation app responds to standard media or arrow keys.
+
+**The screenshot, camera, microphone, or install prompt is unavailable**
+
+Desktop screen capture needs an active desktop session and supported screenshot backend. Phone camera, microphone, PWA install, and browser clipboard APIs may require a trusted HTTPS origin; the default HTTP mode is intended for basic local sharing.
+
+**Port 8765 is already in use**
+
+Start with `--port 0`; QuickShare will select and print an available port.
+
+## Project layout
 
 ```text
-fastshare-main/
-├── quickshare              # CLI launcher script
-├── quickshare.py           # Pure Python HTTP/REST backend server + mDNS publisher
+fastshare/
+├── quickshare                 # Ubuntu launcher
+├── quickshare.bat             # Windows launcher; bootstraps a local venv
+├── quickshare.py              # Python HTTP server and platform integrations
+├── requirements.txt           # Cross-platform Python dependencies
+├── .quickshare_vendor/        # Bundled QR-code fallback
 ├── frontend/
-│   ├── index.html          # Semantic HTML layout (Home + Bento Workspace)
-│   ├── styles.css          # Responsive Bento grid & Light/Dark design system
-│   └── app.js              # Frontend state, live polling, XHR upload progress & cards
-├── requirements.txt
-└── .quickshare_vendor/     # Vendored QR code generator
+│   ├── index.html             # Laptop and phone app pages
+│   ├── styles.css             # Responsive styling
+│   └── app.js                 # Sharing, navigation, and remote controls
+├── docs/screenshots/          # README UI screenshots
+└── tests/                     # Server and platform-helper tests
+```
+
+## Tests
+
+From the project directory, run:
+
+```bash
+python -m unittest discover -s tests -v
 ```
