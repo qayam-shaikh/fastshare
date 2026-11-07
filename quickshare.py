@@ -5,14 +5,17 @@ from __future__ import annotations
 import argparse
 import base64
 import cgi
+import errno
 import hmac
 import html
 import ipaddress
 import json
 import mimetypes
+import os
 import secrets
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -40,6 +43,18 @@ ZIP_EXTENSIONS = {".zip"}
 VIDEO_EXTENSIONS = {".mp4", ".webm"}
 AUDIO_EXTENSIONS = {".mp3", ".wav"}
 DOCUMENT_PREVIEW_EXTENSIONS = {".pdf", ".md", ".json", ".py"}
+ALREADY_COMPRESSED_EXTENSIONS = {
+    ".7z", ".avif", ".br", ".bz2", ".docx", ".gif", ".gz", ".heic", ".jpeg",
+    ".jpg", ".jxl", ".m4a", ".m4v", ".mkv", ".mov", ".mp3", ".mp4", ".mpeg",
+    ".mpg", ".odp", ".ods", ".odt", ".ogg", ".opus", ".pdf", ".png", ".pptx",
+    ".rar", ".webm", ".webp", ".woff", ".woff2", ".xlsx", ".xz", ".zip", ".zst",
+}
+
+
+def zip_compression_for_name(filename: str) -> int:
+    if Path(filename).suffix.lower() in ALREADY_COMPRESSED_EXTENSIONS:
+        return zipfile.ZIP_STORED
+    return zipfile.ZIP_DEFLATED
 
 
 def format_size(num_bytes: int) -> str:
@@ -371,9 +386,15 @@ class ShareState:
             if not files:
                 raise ValueError(f"Folder is empty: {source}")
             archive_path = unique_path(self.storage_dir, f"{source.name or 'folder'}.zip")
-            with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            with zipfile.ZipFile(
+                archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=1
+            ) as archive:
                 for path in files:
-                    archive.write(path, path.relative_to(source))
+                    archive.write(
+                        path,
+                        path.relative_to(source),
+                        compress_type=zip_compression_for_name(path.name),
+                    )
             return [self._register_local_file(archive_path, is_folder_zip=True)]
 
         if not source.is_file():
@@ -431,36 +452,38 @@ class ShareState:
         created: list[TransferItem] = []
 
         if folder:
+            relative_paths = [
+                safe_relative_path(item.filename) for item in valid_items
+            ]
+            files_by_path = {
+                rel_path.as_posix(): (item, rel_path)
+                for item, rel_path in zip(valid_items, relative_paths)
+            }
+            top_folder_name = next(
+                (path.parts[0] for path in relative_paths if len(path.parts) > 1),
+                "folder",
+            )
             with self.lock:
-                batch_dir = self.storage_dir / f"folder_build_{ self._next_id() }"
-            batch_dir.mkdir(parents=True, exist_ok=True)
-            top_folder_name = "folder"
-            saved_count = 0
+                archive_path = unique_path(
+                    self.storage_dir, f"{safe_name(top_folder_name, 'folder')}.zip"
+                )
+                archive_path.touch(exist_ok=False)
 
-            for item in valid_items:
-                rel_path = safe_relative_path(item.filename)
-                if len(rel_path.parts) > 1 and top_folder_name == "folder":
-                    top_folder_name = rel_path.parts[0]
-                target = batch_dir / rel_path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with target.open("wb") as dest:
-                    while chunk := item.file.read(MIB):
-                        dest.write(chunk)
-                saved_count += 1
+            try:
+                with zipfile.ZipFile(
+                    archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=1
+                ) as zf:
+                    for item, rel_path in files_by_path.values():
+                        info = zipfile.ZipInfo(rel_path.as_posix())
+                        info.compress_type = zip_compression_for_name(rel_path.name)
+                        with zf.open(info, "w", force_zip64=True) as dest:
+                            while chunk := item.file.read(MIB):
+                                dest.write(chunk)
+            except Exception:
+                archive_path.unlink(missing_ok=True)
+                raise
 
-            if saved_count == 0:
-                shutil.rmtree(batch_dir, ignore_errors=True)
-                raise ValueError("Selected folder was empty.")
-
-            zip_filename = f"{safe_name(top_folder_name, 'folder')}.zip"
             with self.lock:
-                archive_path = unique_path(self.storage_dir, zip_filename)
-                with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for fpath in batch_dir.rglob("*"):
-                        if fpath.is_file():
-                            zf.write(fpath, fpath.relative_to(batch_dir))
-                shutil.rmtree(batch_dir, ignore_errors=True)
-
                 if sender == "phone" and self.save_inbox:
                     self.inbox.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(archive_path, unique_path(self.inbox, archive_path.name))
@@ -735,7 +758,7 @@ class Handler(BaseHTTPRequestHandler):
 
         return self.deny()
 
-    def parse_form(self, *, is_folder: bool = False) -> cgi.FieldStorage | None:
+    def parse_form(self) -> cgi.FieldStorage | None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -748,7 +771,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return None
         free_bytes = shutil.disk_usage(self.server.state.work).free
-        storage_multiplier = 3 if is_folder else 2
+        storage_multiplier = 3 if self.server.state.save_inbox else 2
         required_bytes = length * storage_multiplier
         if required_bytes > free_bytes:
             self.deny(
@@ -979,7 +1002,7 @@ class Handler(BaseHTTPRequestHandler):
         return self.redirect(self.phone_path())
 
     def handle_upload_post(self, sender: str, suffix: str) -> None:
-        form = self.parse_form(is_folder=suffix == "/folder")
+        form = self.parse_form()
         if form is None:
             return
         state = self.server.state
@@ -1094,16 +1117,55 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             with item.path.open("rb") as source:
-                source.seek(start)
-                remaining = end - start + 1
-                while remaining > 0:
-                    chunk = source.read(min(MIB, remaining))
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    remaining -= len(chunk)
+                self.copy_file_to_response(source, start, end - start + 1)
         except (OSError, BrokenPipeError):
             pass
+
+    def copy_file_to_response(
+        self, source: BinaryIO, offset: int, count: int
+    ) -> None:
+        source.seek(offset)
+        remaining = count
+        unsupported_sendfile_errors = {
+            errno.EINVAL,
+            errno.ENOSYS,
+            errno.EOPNOTSUPP,
+            errno.EXDEV,
+        }
+
+        if (
+            os.name == "posix"
+            and hasattr(os, "sendfile")
+            and not isinstance(self.connection, ssl.SSLSocket)
+        ):
+            self.wfile.flush()
+            sent = 0
+            while sent < count:
+                try:
+                    written = os.sendfile(
+                        self.connection.fileno(),
+                        source.fileno(),
+                        offset + sent,
+                        count - sent,
+                    )
+                except InterruptedError:
+                    continue
+                except OSError as error:
+                    if error.errno in unsupported_sendfile_errors:
+                        break
+                    raise
+                if written == 0:
+                    break
+                sent += written
+            remaining -= sent
+            source.seek(offset + sent)
+
+        while remaining > 0:
+            chunk = source.read(min(MIB, remaining))
+            if not chunk:
+                break
+            self.wfile.write(chunk)
+            remaining -= len(chunk)
 
     def serve_received_zip(self, role: str) -> None:
         state = self.server.state
@@ -1146,9 +1208,13 @@ class Handler(BaseHTTPRequestHandler):
             ) as temporary:
                 archive_path = Path(temporary.name)
 
-            with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            with zipfile.ZipFile(
+                archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=1
+            ) as archive:
                 for source, archive_name in sources:
-                    with archive.open(archive_name, "w") as destination:
+                    info = zipfile.ZipInfo(archive_name)
+                    info.compress_type = zip_compression_for_name(archive_name)
+                    with archive.open(info, "w", force_zip64=True) as destination:
                         shutil.copyfileobj(source, destination, length=MIB)
 
             size = archive_path.stat().st_size
@@ -1164,7 +1230,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             response_started = True
             with archive_path.open("rb") as source:
-                shutil.copyfileobj(source, self.wfile, length=MIB)
+                self.copy_file_to_response(source, 0, size)
         except OSError as error:
             if not response_started:
                 return self.deny(
@@ -1326,6 +1392,7 @@ class Handler(BaseHTTPRequestHandler):
             "qrDataUri": qr_uri,
             "maxUploadMib": state.max_upload // MIB,
             "freeDiskBytes": shutil.disk_usage(state.work).free,
+            "saveInbox": state.save_inbox,
             "scratchpad": state.scratchpad,
             "scratchpadRevision": state.scratchpad_revision,
             "pinEnabled": bool(state.pin),

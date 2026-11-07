@@ -11,6 +11,7 @@ const STATE = window.__INITIAL_STATE__ || {
   qrDataUri: "",
   maxUploadMib: 500,
   freeDiskBytes: 0,
+  saveInbox: false,
   remainingSeconds: 3600,
   error: "",
   items: []
@@ -808,7 +809,7 @@ async function uploadSelectedFiles(fileList, isFolder) {
     showError(`Selected files exceed the ${STATE.maxUploadMib} MiB upload limit.`);
     return;
   }
-  const requiredDiskBytes = requestBytes * (isFolder ? 3 : 2);
+  const requiredDiskBytes = requestBytes * (STATE.saveInbox ? 3 : 2);
   if (Number.isFinite(STATE.freeDiskBytes) && requiredDiskBytes > STATE.freeDiskBytes) {
     showError(`Upload may need up to ${formatBytes(requiredDiskBytes)} temporary storage; ${formatBytes(STATE.freeDiskBytes)} is available.`);
     return;

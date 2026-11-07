@@ -50,6 +50,10 @@ On the Laptop Hub, use **Save to Inbox** on a received item to copy it directly 
 
 Start QuickShare with `--pin 1234` to require that four-digit PIN when a phone first opens the session. The browser remembers authorization for that session. Uploads show live transfer speed/ETA and available laptop disk space; requests are rejected if the upload limit or available storage would be exceeded.
 
+## Transfer performance
+
+On Linux, file downloads use the kernel's `sendfile` path when available, with a buffered fallback for HTTPS and unsupported platforms. Folder uploads are packaged directly from the multipart temporary files instead of first expanding every file into another temporary directory. Folder ZIPs use fast compression for ordinary files and skip recompression for common media, image, and archive formats. Actual speeds still depend on the Wi-Fi link and device storage.
+
 ## Install QuickShare on a phone
 
 The phone page provides installable-app icons, an Android share target for photos, video, audio, PDFs, links, and text, and an **Install App** button. Android browsers may show the install prompt or require choosing **Install app / Add to Home screen** from the browser menu. On iPhone or iPad, open the page in Safari, tap **Share**, then choose **Add to Home Screen**.
