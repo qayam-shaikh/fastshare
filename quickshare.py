@@ -6,16 +6,19 @@ import argparse
 import base64
 import cgi
 import errno
+import hashlib
 import hmac
 import html
 import ipaddress
 import json
 import mimetypes
 import os
+import re
 import secrets
 import shutil
 import socket
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
@@ -41,7 +44,7 @@ IMAGE_EXTENSIONS = {
 }
 ZIP_EXTENSIONS = {".zip"}
 VIDEO_EXTENSIONS = {".mp4", ".webm"}
-AUDIO_EXTENSIONS = {".mp3", ".wav"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".opus"}
 DOCUMENT_PREVIEW_EXTENSIONS = {".pdf", ".md", ".json", ".py"}
 ALREADY_COMPRESSED_EXTENSIONS = {
     ".7z", ".avif", ".br", ".bz2", ".docx", ".gif", ".gz", ".heic", ".jpeg",
@@ -181,12 +184,14 @@ def clipboard_text() -> str | None:
     return None
 
 
-def classify_file_kind(filename: str) -> str:
+def classify_file_kind(filename: str, mime: str = "") -> str:
     ext = Path(filename).suffix.lower()
     if ext in ZIP_EXTENSIONS:
         return "zip"
     if ext in IMAGE_EXTENSIONS:
         return "image"
+    if mime.startswith("audio/") or ext in AUDIO_EXTENSIONS:
+        return "audio"
     guessed, _ = mimetypes.guess_type(filename)
     if guessed:
         if guessed in ("application/zip", "application/x-zip-compressed"):
@@ -209,6 +214,7 @@ class TransferItem:
     text_content: str = ""
     text_too_long: bool = False
     is_folder_zip: bool = False
+    burn_after_read: bool = False
 
     def to_dict(self, base_url: str) -> dict:
         return {
@@ -223,10 +229,12 @@ class TransferItem:
             "text_content": self.text_content,
             "text_too_long": self.text_too_long,
             "is_folder_zip": self.is_folder_zip,
+            "burn_after_read": self.burn_after_read,
             "download_url": f"{base_url}/download/{self.id}",
             "preview_url": (
                 f"{base_url}/preview/{self.id}"
                 if self.kind == "image"
+                or self.mime.startswith(("audio/", "video/"))
                 or Path(self.name).suffix.lower() in (
                     DOCUMENT_PREVIEW_EXTENSIONS | VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
                 )
@@ -268,7 +276,16 @@ class ShareState:
         self.initial_focus = "send"  # "send" or "receive"
         self.phone_connected = False
         self.last_phone_seen: float = 0.0
+        self.phone_devices: dict[str, dict[str, object]] = {}
         self.lock = threading.Lock()
+        self.trusted_devices_path = Path(
+            getattr(
+                args,
+                "trusted_devices_file",
+                Path.home() / ".config" / "quickshare" / "trusted_devices.json",
+            )
+        ).expanduser()
+        self.trusted_devices = self._load_trusted_devices()
 
         # Retained for backwards compatibility
         self.downloads: list[Path] = []
@@ -292,6 +309,173 @@ class ShareState:
             # Automatically transition laptop to active workspace once phone scans QR
             if self.screen == "home":
                 self.screen = "workspace"
+
+    def mark_phone_request(self) -> None:
+        with self.lock:
+            if self.screen == "home":
+                self.screen = "workspace"
+
+    def request_phone_approval(
+        self, token: str | None, client_ip: str, user_agent: str, *, retry: bool = False
+    ) -> tuple[str, bool]:
+        with self.lock:
+            valid_token = bool(token and re.fullmatch(r"[A-Za-z0-9_-]{32}", token))
+            if not valid_token:
+                token = secrets.token_urlsafe(24)
+            if token not in self.phone_devices:
+                trusted = self.trusted_devices.get(self._device_fingerprint(token))
+                self.phone_devices[token] = {
+                    "ip": client_ip,
+                    "user_agent": user_agent[:200],
+                    "requested_at": time.time(),
+                    "approved": trusted is not None,
+                    "denied": False,
+                }
+                return token, not valid_token
+            device = self.phone_devices[token]
+            if retry and device["denied"]:
+                device["denied"] = False
+                device["requested_at"] = time.time()
+            return token, False
+
+    def phone_approval_status(self, token: str | None) -> dict[str, bool]:
+        with self.lock:
+            device = self.phone_devices.get(token or "")
+            return {
+                "known": device is not None,
+                "approved": bool(device and device["approved"]),
+                "denied": bool(device and device["denied"]),
+            }
+
+    def pending_phone_devices(self) -> list[dict[str, str]]:
+        with self.lock:
+            return [
+                {
+                    "id": token,
+                    "ip": str(device["ip"]),
+                    "name": self._phone_device_name(str(device["user_agent"])),
+                }
+                for token, device in self.phone_devices.items()
+                if not device["approved"] and not device["denied"]
+            ]
+
+    @staticmethod
+    def _phone_device_name(user_agent: str) -> str:
+        agent = user_agent.lower()
+        if "android" in agent:
+            return "Android phone"
+        if "iphone" in agent:
+            return "iPhone"
+        if "ipad" in agent:
+            return "iPad"
+        return "Phone or mobile browser"
+
+    @staticmethod
+    def _device_fingerprint(token: str) -> str:
+        return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    def _load_trusted_devices(self) -> dict[str, dict[str, str]]:
+        try:
+            data = json.loads(self.trusted_devices_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError) as error:
+            raise RuntimeError(
+                f"Could not load remembered QuickShare devices from {self.trusted_devices_path}: {error}"
+            ) from error
+        if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("devices"), dict):
+            raise RuntimeError(f"Invalid remembered-device data in {self.trusted_devices_path}.")
+        return {
+            fingerprint: {
+                "name": str(record.get("name", "Phone or mobile browser")),
+                "approved_at": str(record.get("approved_at", "")),
+            }
+            for fingerprint, record in data["devices"].items()
+            if isinstance(fingerprint, str)
+            and len(fingerprint) == 64
+            and isinstance(record, dict)
+        }
+
+    def _save_trusted_devices(self) -> None:
+        path = self.trusted_devices_path
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(path.parent, 0o700)
+        payload = json.dumps(
+            {"version": 1, "devices": self.trusted_devices},
+            ensure_ascii=False,
+            indent=2,
+        )
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                delete=False,
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+                temporary.write(payload)
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.chmod(temporary_path, 0o600)
+            temporary_path.replace(path)
+        except OSError:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+            raise
+
+    def trusted_phone_devices(self) -> list[dict[str, str]]:
+        with self.lock:
+            return [
+                {
+                    "id": fingerprint,
+                    "name": record["name"],
+                    "approved_at": record["approved_at"],
+                }
+                for fingerprint, record in self.trusted_devices.items()
+            ]
+
+    def set_phone_approval(self, token: str, approved: bool, *, remember: bool = False) -> bool:
+        with self.lock:
+            device = self.phone_devices.get(token)
+            if device is None or device["approved"] or device["denied"]:
+                return False
+            if approved and remember:
+                fingerprint = self._device_fingerprint(token)
+                previous = self.trusted_devices.get(fingerprint)
+                self.trusted_devices[fingerprint] = {
+                    "name": self._phone_device_name(str(device["user_agent"])),
+                    "approved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                }
+                try:
+                    self._save_trusted_devices()
+                except OSError:
+                    if previous is None:
+                        self.trusted_devices.pop(fingerprint, None)
+                    else:
+                        self.trusted_devices[fingerprint] = previous
+                    raise
+            device["approved"] = approved
+            device["denied"] = not approved
+            return True
+
+    def forget_phone_device(self, fingerprint: str) -> bool:
+        with self.lock:
+            if fingerprint not in self.trusted_devices:
+                return False
+            previous = self.trusted_devices[fingerprint]
+            del self.trusted_devices[fingerprint]
+            try:
+                self._save_trusted_devices()
+            except OSError:
+                self.trusted_devices[fingerprint] = previous
+                raise
+            for token, device in self.phone_devices.items():
+                if self._device_fingerprint(token) == fingerprint:
+                    device["approved"] = False
+                    device["denied"] = True
+            return True
 
     def start_phone_session(self, mode: str = "both") -> None:
         with self.lock:
@@ -322,7 +506,14 @@ class ShareState:
                     return True
         return False
 
-    def add_text_item(self, sender: str, text: str, label: str = "text-snippet.txt") -> TransferItem:
+    def add_text_item(
+        self,
+        sender: str,
+        text: str,
+        label: str = "text-snippet.txt",
+        *,
+        burn_after_read: bool = False,
+    ) -> TransferItem:
         cleaned = text.replace("\r\n", "\n")
         if not cleaned.strip():
             raise ValueError("Enter or copy some non-empty text first.")
@@ -350,6 +541,7 @@ class ShareState:
                 mime="text/plain; charset=utf-8",
                 text_content=preview,
                 text_too_long=too_long,
+                burn_after_read=burn_after_read,
             )
             self.items.append(item)
             if sender == "laptop":
@@ -359,6 +551,38 @@ class ShareState:
             else:
                 self.received.append(f"Text: {cleaned[:200]}")
             return item
+
+    def consume_burn_item(self, item_id: str, consumer_role: str) -> bool:
+        with self.lock:
+            for index, item in enumerate(self.items):
+                if (
+                    item.id != item_id
+                    or not item.burn_after_read
+                    or item.sender == consumer_role
+                ):
+                    continue
+                item.path.unlink(missing_ok=True)
+                self.items.pop(index)
+                return True
+        return False
+
+    def claim_item_download(
+        self, item_id: str, consumer_role: str, *, inline: bool
+    ) -> tuple[TransferItem, BinaryIO] | None:
+        with self.lock:
+            for index, item in enumerate(self.items):
+                if item.id != item_id or not item.path.is_file():
+                    continue
+                source = item.path.open("rb")
+                if not inline and item.burn_after_read and item.sender != consumer_role:
+                    try:
+                        item.path.unlink()
+                    except OSError:
+                        source.close()
+                        raise
+                    self.items.pop(index)
+                return item, source
+        return None
 
     def add_clipboard(self) -> TransferItem:
         text = clipboard_text()
@@ -522,8 +746,16 @@ class ShareState:
                     self.inbox.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(target, unique_path(self.inbox, target.name))
 
-                kind = classify_file_kind(target.name)
-                mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+                guessed_mime = mimetypes.guess_type(target.name)[0]
+                upload_mime = getattr(item, "type", "")
+                mime = (
+                    upload_mime
+                    if upload_mime.startswith("audio/")
+                    and Path(target.name).suffix.lower()
+                    in AUDIO_EXTENSIONS | {".webm"}
+                    else guessed_mime or "application/octet-stream"
+                )
+                kind = classify_file_kind(target.name, mime)
                 item_id = self._next_id()
                 transfer = TransferItem(
                     id=item_id,
@@ -627,6 +859,18 @@ class Handler(BaseHTTPRequestHandler):
             )
         )
 
+    def phone_device_token(self) -> str | None:
+        try:
+            cookie = SimpleCookie(self.headers.get("Cookie", ""))
+        except CookieError:
+            return None
+        morsel = cookie.get("quickshare_device")
+        return morsel.value if morsel else None
+
+    def phone_is_approved(self) -> bool:
+        status = self.server.state.phone_approval_status(self.phone_device_token())
+        return status["approved"]
+
     def send_text(
         self,
         text: str,
@@ -693,12 +937,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.handle_api_state(role="laptop")
             if suffix == "/download-all":
                 return self.serve_received_zip("laptop")
+            if suffix == "/zip":
+                return self.handle_zip_contents()
+            if suffix == "/zip/file":
+                return self.serve_zip_member()
             if suffix == "/storage":
                 return self.send_json(self.storage_status())
             if suffix.startswith("/download/"):
-                return self.serve_item_file(suffix.rsplit("/", 1)[1], inline=False)
+                return self.serve_item_file(suffix.rsplit("/", 1)[1], role="laptop")
             if suffix.startswith("/preview/"):
-                return self.serve_item_file(suffix.rsplit("/", 1)[1], inline=True)
+                return self.serve_item_file(suffix.rsplit("/", 1)[1], role="laptop", inline=True)
             return self.deny()
 
         if self.is_phone(path):
@@ -709,19 +957,35 @@ class Handler(BaseHTTPRequestHandler):
                 if suffix in ("", "/"):
                     return self.send_html(self.render_pin_page())
                 return self.deny(HTTPStatus.UNAUTHORIZED, "Enter the session PIN to unlock this phone.")
-            state.mark_phone_seen()
             if suffix in ("", "/"):
-                return self.send_html(self.render_app_page(role="phone"))
+                return self.handle_phone_landing()
+            if suffix == "/approval-status":
+                status = self.server.state.phone_approval_status(
+                    self.phone_device_token()
+                )
+                return self.send_json({"ok": True, **status})
+            if not self.phone_is_approved():
+                return self.deny(
+                    HTTPStatus.FORBIDDEN,
+                    "This phone must be approved on the laptop before accessing the session.",
+                )
+            state.mark_phone_seen()
             if suffix == "/api/state":
                 return self.handle_api_state(role="phone")
             if suffix == "/download-all":
                 return self.serve_received_zip("phone")
             if suffix == "/storage":
                 return self.send_json(self.storage_status())
+            if suffix == "/remote/screenshot":
+                return self.serve_laptop_screenshot()
+            if suffix == "/zip":
+                return self.handle_zip_contents()
+            if suffix == "/zip/file":
+                return self.serve_zip_member()
             if suffix.startswith("/download/"):
-                return self.serve_item_file(suffix.rsplit("/", 1)[1], inline=False)
+                return self.serve_item_file(suffix.rsplit("/", 1)[1], role="phone")
             if suffix.startswith("/preview/"):
-                return self.serve_item_file(suffix.rsplit("/", 1)[1], inline=True)
+                return self.serve_item_file(suffix.rsplit("/", 1)[1], role="phone", inline=True)
             return self.deny()
 
         return self.deny()
@@ -744,6 +1008,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self.handle_pin_unlock()
             if not self.phone_is_unlocked():
                 return self.deny(HTTPStatus.UNAUTHORIZED, "Enter the session PIN to unlock this phone.")
+            if suffix == "/request-approval":
+                token, _ = state.request_phone_approval(
+                    self.phone_device_token(),
+                    self.client_address[0],
+                    self.headers.get("User-Agent", ""),
+                    retry=True,
+                )
+                state.mark_phone_request()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Set-Cookie", self.phone_device_cookie(token))
+                self.send_header("Content-Length", "0")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return
+            if not self.phone_is_approved():
+                return self.deny(
+                    HTTPStatus.FORBIDDEN,
+                    "This phone must be approved on the laptop before accessing the session.",
+                )
             state.mark_phone_seen()
             if suffix in ("/upload", "/files", "/images", "/folder", "/text"):
                 return self.handle_upload_post(sender="phone", suffix=suffix)
@@ -751,6 +1034,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.handle_scratchpad_post()
             if suffix == "/share-target":
                 return self.handle_share_target()
+            if suffix == "/open-url":
+                return self.handle_open_url()
+            if suffix.startswith("/remote/"):
+                return self.handle_remote_action(suffix[len("/remote/"):])
+            if suffix.startswith("/consume/"):
+                item_id = suffix.rsplit("/", 1)[1]
+                try:
+                    if state.consume_burn_item(item_id, "phone"):
+                        return self.send_json({"ok": True, "consumed": True})
+                except OSError as error:
+                    return self.send_json(
+                        {"ok": False, "error": f"Could not remove this one-time item: {error}"},
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                return self.deny(HTTPStatus.CONFLICT, "This one-time item was already used or is unavailable.")
             if suffix.startswith("/delete/"):
                 item_id = suffix.rsplit("/", 1)[1]
                 state.delete_item(item_id)
@@ -803,6 +1101,8 @@ class Handler(BaseHTTPRequestHandler):
         state = self.server.state
         base = self.admin_path() if role == "laptop" else self.phone_path()
         disk = self.storage_status()
+        pending_devices = state.pending_phone_devices() if role == "laptop" else []
+        trusted_devices = state.trusted_phone_devices() if role == "laptop" else []
         with state.lock:
             items_data = [item.to_dict(base) for item in reversed(state.items)]
             payload = {
@@ -816,11 +1116,367 @@ class Handler(BaseHTTPRequestHandler):
                 "laptop_url": self.laptop_url(),
                 "scratchpad": state.scratchpad,
                 "scratchpad_revision": state.scratchpad_revision,
+                "pending_devices": pending_devices,
+                "trusted_devices": trusted_devices,
                 **disk,
                 "remaining_seconds": state.remaining_seconds(),
                 "items": items_data,
             }
         self.send_json(payload)
+
+    def phone_device_cookie(self, token: str) -> str:
+        secure = "; Secure" if self.server.state.scheme == "https" else ""
+        return (
+            f"quickshare_device={token}; HttpOnly; SameSite=Strict; "
+            f"Path=/{secure}; Max-Age=315360000"
+        )
+
+    def handle_phone_landing(self) -> None:
+        state = self.server.state
+        token, is_new = state.request_phone_approval(
+            self.phone_device_token(),
+            self.client_address[0],
+            self.headers.get("User-Agent", ""),
+        )
+        status = state.phone_approval_status(token)
+        if status["approved"]:
+            state.mark_phone_seen()
+            return self.send_html(self.render_app_page(role="phone"))
+        state.mark_phone_request()
+        body = self.render_device_wait_page(status["denied"])
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body.encode("utf-8"))))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if is_new:
+            self.send_header("Set-Cookie", self.phone_device_cookie(token))
+        self.end_headers()
+        self.wfile.write(body.encode("utf-8"))
+
+    def render_device_wait_page(self, denied: bool) -> str:
+        phone_path = json.dumps(self.phone_path())
+        denied_message = (
+            '<p id="approvalMessage">This connection was not approved.</p>'
+            '<button id="requestAgain" type="button" onclick="requestAgain()">Request approval again</button>'
+            if denied
+            else '<p id="approvalMessage">Approve this phone from the laptop to continue.</p>'
+        )
+        return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0b0f19">
+<title>QuickShare • Approval</title><style>
+*{{box-sizing:border-box}}body{{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;background:#f4f6fb;color:#0f172a;font:16px/1.5 system-ui,sans-serif}}
+main{{width:min(440px,100%);padding:26px;background:#fff;border:1px solid #e2e8f0;border-radius:20px;box-shadow:0 12px 32px #0f172a12;text-align:center}}
+.mark{{width:48px;height:48px;margin:0 auto 14px;display:grid;place-items:center;border-radius:14px;background:#eef2ff;color:#4f46e5;font-size:24px}}
+h1{{margin:0 0 8px;font-size:1.25rem}}p{{margin:0;color:#64748b}}button{{margin-top:16px;padding:11px 16px;border:0;border-radius:10px;background:#4f46e5;color:#fff;font:inherit;font-weight:700}}
+</style></head><body><main><div class="mark">✓</div><h1>Waiting for laptop approval</h1>{denied_message}</main>
+<script>
+const base={phone_path};
+async function checkApproval(){{try{{const response=await fetch(base+"/approval-status",{{cache:"no-store"}});const status=await response.json();if(status.approved)location.reload();if(status.denied)document.getElementById("approvalMessage").textContent="This connection was not approved.";}}catch(error){{console.error("Approval check failed",error);}}}}
+async function requestAgain(){{const response=await fetch(base+"/request-approval",{{method:"POST",headers:{{"X-Requested-With":"XMLHttpRequest"}}}});if(!response.ok){{document.getElementById("approvalMessage").textContent="Could not request approval. Reload the page to try again.";return;}}location.reload();}}
+setInterval(checkApproval,1500);
+</script></body></html>"""
+
+    def handle_open_url(self) -> None:
+        payload = self.read_json_body(limit=8192)
+        if payload is None or not isinstance(payload.get("url"), str):
+            return self.deny(HTTPStatus.BAD_REQUEST, "Expected an HTTP or HTTPS URL.")
+        raw_url = payload["url"].strip()
+        try:
+            parsed = urllib.parse.urlsplit(raw_url)
+            port = parsed.port
+            valid = (
+                len(raw_url) <= 4096
+                and parsed.scheme.lower() in ("http", "https")
+                and bool(parsed.hostname)
+                and parsed.username is None
+                and parsed.password is None
+                and (port is None or 1 <= port <= 65535)
+                and not any(ord(char) < 32 for char in raw_url)
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            return self.deny(HTTPStatus.BAD_REQUEST, "Only valid HTTP or HTTPS links can be opened.")
+        try:
+            opened = webbrowser.open(raw_url, new=2)
+        except (OSError, webbrowser.Error) as error:
+            return self.send_json(
+                {"ok": False, "error": f"Could not open the laptop browser: {error}"},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        if not opened:
+            return self.send_json(
+                {"ok": False, "error": "The laptop browser could not open this link."},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        self.send_json({"ok": True})
+
+    def read_json_body(self, *, limit: int = MIB) -> dict | None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self.deny(HTTPStatus.BAD_REQUEST, "Invalid request length.")
+            return None
+        if length <= 0 or length > limit:
+            self.deny(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Request body is missing or too large.")
+            return None
+        if self.headers.get_content_type() != "application/json":
+            self.deny(HTTPStatus.BAD_REQUEST, "Expected a JSON request.")
+            return None
+        try:
+            payload = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self.deny(HTTPStatus.BAD_REQUEST, "Could not read request data.")
+            return None
+        if not isinstance(payload, dict):
+            self.deny(HTTPStatus.BAD_REQUEST, "Expected a JSON object.")
+            return None
+        return payload
+
+    def handle_remote_action(self, action: str) -> None:
+        if action == "open-url":
+            return self.handle_open_url()
+
+        commands = {
+            "media-toggle": ("playerctl", ["play-pause"]),
+            "volume-down": ("pactl", ["set-sink-volume", "@DEFAULT_SINK@", "-5%"]),
+            "slide-previous": ("xdotool", ["key", "Left"]),
+            "slide-next": ("xdotool", ["key", "Right"]),
+        }
+        if action == "volume-up":
+            executable = shutil.which("pactl")
+            if not executable:
+                return self.send_json(
+                    {"ok": False, "error": "pactl is not installed on the laptop."},
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            try:
+                current = subprocess.run(
+                    [executable, "get-sink-volume", "@DEFAULT_SINK@"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                levels = [int(value) for value in re.findall(r"(\d+)%", current.stdout)]
+                if not levels:
+                    return self.send_json(
+                        {"ok": False, "error": "Could not read the current laptop volume."},
+                        status=HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                target = min(100, max(levels) + 5)
+                subprocess.run(
+                    [executable, "set-sink-volume", "@DEFAULT_SINK@", f"{target}%"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except subprocess.CalledProcessError as error:
+                detail = (error.stderr or "").strip()
+                return self.send_json(
+                    {"ok": False, "error": detail or "pactl could not change laptop volume."},
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            except subprocess.TimeoutExpired:
+                return self.send_json(
+                    {"ok": False, "error": "pactl did not respond in time."},
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            self.send_json({"ok": True})
+            return
+        command = commands.get(action)
+        if command is None:
+            return self.deny(HTTPStatus.BAD_REQUEST, "Unknown remote-control action.")
+        executable = shutil.which(command[0])
+        if not executable:
+            return self.send_json(
+                {
+                    "ok": False,
+                    "error": f"{command[0]} is not installed on the laptop.",
+                },
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        try:
+            subprocess.run(
+                [executable, *command[1]],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except subprocess.CalledProcessError as error:
+            detail = (error.stderr or "").strip()
+            return self.send_json(
+                {
+                    "ok": False,
+                    "error": detail or f"{command[0]} could not perform the action.",
+                },
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        except subprocess.TimeoutExpired:
+            return self.send_json(
+                {"ok": False, "error": f"{command[0]} did not respond in time."},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        self.send_json({"ok": True})
+
+    def serve_laptop_screenshot(self) -> None:
+        state = self.server.state
+        command: list[str] | None = None
+        for program, args in (
+            ("grim", []),
+            ("gnome-screenshot", ["-f"]),
+            ("scrot", []),
+        ):
+            executable = shutil.which(program)
+            if executable:
+                command = [executable, *args]
+                break
+        if command is None:
+            return self.send_json(
+                {
+                    "ok": False,
+                    "error": "No screenshot utility found. Install grim (Wayland), gnome-screenshot, or scrot.",
+                },
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+
+        with tempfile.NamedTemporaryFile(
+            prefix="quickshare-screen-", suffix=".png", dir=state.work, delete=False
+        ) as temporary:
+            screenshot_path = Path(temporary.name)
+        command.append(str(screenshot_path))
+        try:
+            subprocess.run(command, check=True, capture_output=True, timeout=15)
+        except (OSError, subprocess.SubprocessError) as error:
+            screenshot_path.unlink(missing_ok=True)
+            self.send_json(
+                {"ok": False, "error": f"Could not capture the laptop screen: {error}"},
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+            return
+        response_started = False
+        try:
+            size = screenshot_path.stat().st_size
+            with screenshot_path.open("rb") as screenshot:
+                if screenshot.read(8) != b"\x89PNG\r\n\x1a\n":
+                    return self.send_json(
+                        {"ok": False, "error": "The screenshot utility did not produce a PNG image."},
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(size))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                response_started = True
+                self.copy_file_to_response(screenshot, 0, size)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except OSError as error:
+            if not response_started:
+                self.send_json(
+                    {"ok": False, "error": f"Could not stream the laptop screenshot: {error}"},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+        finally:
+            screenshot_path.unlink(missing_ok=True)
+
+    def handle_zip_contents(self) -> None:
+        item_id = urllib.parse.parse_qs(
+            urllib.parse.urlsplit(self.path).query
+        ).get("id", [""])[0]
+        item = self.server.state.get_item(item_id)
+        if item is None or item.kind != "zip":
+            return self.deny(HTTPStatus.NOT_FOUND, "ZIP archive is no longer available.")
+        try:
+            with zipfile.ZipFile(item.path) as archive:
+                entries = []
+                for index, info in enumerate(archive.infolist()):
+                    if info.is_dir() or not self.safe_zip_member(info):
+                        continue
+                    entries.append(
+                        {
+                            "index": index,
+                            "name": info.filename,
+                            "size": info.file_size,
+                            "size_human": format_size(info.file_size),
+                            "downloadable": info.file_size <= self.server.state.max_upload,
+                        }
+                    )
+                    if len(entries) >= 5000:
+                        break
+        except (OSError, zipfile.BadZipFile, ValueError) as error:
+            return self.send_json(
+                {"ok": False, "error": f"Could not read ZIP contents: {error}"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+        self.send_json({"ok": True, "name": item.name, "entries": entries})
+
+    @staticmethod
+    def safe_zip_member(info: zipfile.ZipInfo) -> bool:
+        normalized = info.filename.replace("\\", "/")
+        path = Path(normalized)
+        parts = normalized.split("/")
+        mode = info.external_attr >> 16
+        return bool(
+            normalized
+            and not normalized.startswith("/")
+            and not path.is_absolute()
+            and ".." not in parts
+            and not (parts and parts[0].endswith(":"))
+            and not stat.S_ISLNK(mode)
+        )
+
+    def serve_zip_member(self) -> None:
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        item_id = query.get("id", [""])[0]
+        try:
+            entry_index = int(query.get("entry", [""])[0])
+        except ValueError:
+            return self.deny(HTTPStatus.BAD_REQUEST, "Invalid ZIP entry.")
+        item = self.server.state.get_item(item_id)
+        if item is None or item.kind != "zip":
+            return self.deny(HTTPStatus.NOT_FOUND, "ZIP archive is no longer available.")
+        response_started = False
+        try:
+            with zipfile.ZipFile(item.path) as archive:
+                infos = archive.infolist()
+                if not 0 <= entry_index < len(infos):
+                    return self.deny(HTTPStatus.NOT_FOUND, "ZIP entry not found.")
+                info = infos[entry_index]
+                if (
+                    info.is_dir()
+                    or not self.safe_zip_member(info)
+                    or info.file_size > self.server.state.max_upload
+                ):
+                    return self.deny(HTTPStatus.FORBIDDEN, "This ZIP entry cannot be downloaded.")
+                entry = archive.open(info, "r")
+                self.send_response(HTTPStatus.OK)
+                mime = mimetypes.guess_type(info.filename)[0] or "application/octet-stream"
+                self.send_header("Content-Type", mime)
+                self.send_header(
+                    "Content-Disposition",
+                    f"attachment; filename*=UTF-8''{urllib.parse.quote(safe_name(info.filename))}",
+                )
+                self.send_header("Content-Length", str(info.file_size))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                response_started = True
+                with entry:
+                    while chunk := entry.read(MIB):
+                        self.wfile.write(chunk)
+        except (OSError, zipfile.BadZipFile, RuntimeError, EOFError) as error:
+            if response_started:
+                return
+            return self.send_json(
+                {"ok": False, "error": f"Could not read ZIP entry: {error}"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
 
     def storage_status(self) -> dict:
         usage = shutil.disk_usage(self.server.state.work)
@@ -832,6 +1488,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_admin_post(self, suffix: str) -> None:
         state = self.server.state
+        if suffix == "/open-url":
+            return self.handle_open_url()
+
         if suffix in ("/receive", "/open-send", "/start"):
             mode = "receive" if suffix == "/receive" else "send"
             state.start_phone_session(mode)
@@ -883,6 +1542,58 @@ class Handler(BaseHTTPRequestHandler):
 
         if suffix == "/scratchpad":
             return self.handle_scratchpad_post()
+
+        if suffix.startswith("/consume/"):
+            item_id = suffix.rsplit("/", 1)[1]
+            try:
+                if state.consume_burn_item(item_id, "laptop"):
+                    return self.send_json({"ok": True, "consumed": True})
+            except OSError as error:
+                return self.send_json(
+                    {"ok": False, "error": f"Could not remove this one-time item: {error}"},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            return self.deny(HTTPStatus.CONFLICT, "This one-time item was already used or is unavailable.")
+
+        if (
+            suffix.startswith("/approve-device/")
+            or suffix.startswith("/remember-device/")
+            or suffix.startswith("/deny-device/")
+        ):
+            action, separator, device_id = suffix.strip("/").partition("/")
+            if not separator or not device_id:
+                return self.deny(HTTPStatus.BAD_REQUEST, "Missing device request ID.")
+            approved = action != "deny-device"
+            remember = action == "remember-device"
+            try:
+                updated = state.set_phone_approval(device_id, approved, remember=remember)
+            except OSError as error:
+                return self.send_json(
+                    {"ok": False, "error": f"Could not save this trusted device: {error}"},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            if not updated:
+                return self.send_json(
+                    {"ok": False, "error": "This device request is no longer pending."},
+                    status=HTTPStatus.CONFLICT,
+                )
+            return self.send_json({"ok": True, "approved": approved})
+
+        if suffix.startswith("/forget-device/"):
+            fingerprint = suffix.rsplit("/", 1)[1]
+            try:
+                forgotten = state.forget_phone_device(fingerprint)
+            except OSError as error:
+                return self.send_json(
+                    {"ok": False, "error": f"Could not forget this device: {error}"},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            if not forgotten:
+                return self.send_json(
+                    {"ok": False, "error": "This remembered device was not found."},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+            return self.send_json({"ok": True})
 
         if suffix in ("/upload", "/images", "/files", "/folder", "/text"):
             return self.handle_upload_post(sender="laptop", suffix=suffix)
@@ -1014,7 +1725,14 @@ class Handler(BaseHTTPRequestHandler):
             text_val = form.getfirst("message", "")
             if text_val and text_val.strip():
                 label = "laptop-note.txt" if sender == "laptop" else "phone-note.txt"
-                added.append(state.add_text_item(sender, text_val, label))
+                added.append(
+                    state.add_text_item(
+                        sender,
+                        text_val,
+                        label,
+                        burn_after_read=form.getfirst("burn_after_read", "") == "1",
+                    )
+                )
 
             # 2. Check if folder upload was submitted
             is_folder = suffix == "/folder" or form.getfirst("is_folder", "") == "1"
@@ -1063,7 +1781,9 @@ class Handler(BaseHTTPRequestHandler):
         time.sleep(0.25)
         self.server.shutdown()
 
-    def serve_item_file(self, item_id: str, *, inline: bool = False) -> None:
+    def serve_item_file(
+        self, item_id: str, *, role: str, inline: bool = False
+    ) -> None:
         item = self.server.state.get_item(item_id)
         if item is None or not item.path.exists():
             return self.deny(HTTPStatus.NOT_FOUND, "Item no longer available.")
@@ -1072,6 +1792,7 @@ class Handler(BaseHTTPRequestHandler):
             DOCUMENT_PREVIEW_EXTENSIONS | VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
         ):
             return self.deny(HTTPStatus.NOT_FOUND, "Preview not available for this file.")
+        response_started = False
         try:
             size = item.path.stat().st_size
             start = 0
@@ -1100,6 +1821,14 @@ class Handler(BaseHTTPRequestHandler):
                     self.end_headers()
                     return
 
+            claimed = self.server.state.claim_item_download(
+                item_id,
+                role,
+                inline=inline,
+            )
+            if claimed is None:
+                return self.deny(HTTPStatus.NOT_FOUND, "Item no longer available.")
+            item, source = claimed
             self.send_response(status)
             self.send_header("Content-Type", item.mime)
             disposition = "inline" if inline else "attachment"
@@ -1116,10 +1845,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
-            with item.path.open("rb") as source:
+            response_started = True
+            try:
                 self.copy_file_to_response(source, start, end - start + 1)
-        except (OSError, BrokenPipeError):
+            finally:
+                source.close()
+        except (BrokenPipeError, ConnectionResetError):
             pass
+        except OSError as error:
+            if not response_started:
+                self.send_json(
+                    {"ok": False, "error": f"Could not serve this item: {error}"},
+                    status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
 
     def copy_file_to_response(
         self, source: BinaryIO, offset: int, count: int

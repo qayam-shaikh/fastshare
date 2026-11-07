@@ -18,6 +18,11 @@ const STATE = window.__INITIAL_STATE__ || {
 };
 
 let currentFilter = "all";
+const WORKSPACE_VIEWS = STATE.role === "laptop"
+  ? ["sharing", "transfers", "scratchpad", "connect", "devices"]
+  : ["sharing", "transfers", "scratchpad", "controls"];
+const initialView = window.location.hash.slice(1);
+let activeWorkspaceView = WORKSPACE_VIEWS.includes(initialView) ? initialView : "sharing";
 let qrManuallyToggled = false;
 let qrVisible = true;
 let lastRenderedSignature = "";
@@ -27,10 +32,15 @@ let scratchpadSaveTimer = null;
 let scratchpadSavePending = false;
 let scratchpadLastSynced = String(STATE.scratchpad || "");
 let installPromptEvent = null;
+let voiceRecorder = null;
+let voiceRecorderStream = null;
+let voiceRecorderChunks = [];
+let remoteScreenObjectUrl = "";
 
 function isMediaPreviewable(item) {
   const extension = item.name.split(".").pop().toLowerCase();
-  return ["mp4", "webm", "mp3", "wav"].includes(extension) && Boolean(item.preview_url);
+  return ["audio/", "video/"].some(type => item.mime.startsWith(type))
+    || (["mp4", "webm", "mp3", "wav", "m4a", "aac", "ogg", "opus"].includes(extension) && Boolean(item.preview_url));
 }
 
 function isDocumentPreviewable(item) {
@@ -259,16 +269,6 @@ function inboxSaveAction(item) {
   return `<button type="button" class="btn btn-outline btn-sm" onclick="saveToLaptopInbox('${escapeHtml(item.id)}', this)">Save to Inbox</button>`;
 }
 
-function setSessionView(view) {
-  const scratchpadVisible = view === "scratchpad";
-  document.getElementById("feedViewPanel").hidden = scratchpadVisible;
-  document.getElementById("scratchpadViewPanel").hidden = !scratchpadVisible;
-  document.getElementById("feedViewTab").classList.toggle("active", !scratchpadVisible);
-  document.getElementById("scratchpadViewTab").classList.toggle("active", scratchpadVisible);
-  document.getElementById("feedViewTab").setAttribute("aria-selected", String(!scratchpadVisible));
-  document.getElementById("scratchpadViewTab").setAttribute("aria-selected", String(scratchpadVisible));
-}
-
 function queueScratchpadSave() {
   const input = document.getElementById("scratchpadInput");
   if (!input || input.value === scratchpadLastSynced) return;
@@ -416,12 +416,103 @@ async function copyTextWithFallback(text, btnEl, itemId) {
       if (fallbackBoard) fallbackBoard.style.display = "flex";
     }
   }
+  return copied;
 }
 
 function copyItemTextById(itemId, btnEl) {
   const item = (STATE.items || []).find(it => it.id === itemId);
   if (!item) return;
-  copyTextWithFallback(item.text_content || "", btnEl, itemId);
+  void (async () => {
+    const copied = await copyTextWithFallback(item.text_content || "", btnEl, itemId);
+    if (copied && item.burn_after_read && item.sender !== STATE.role) {
+      await consumeOneTimeItem(itemId);
+    }
+  })();
+}
+
+async function consumeOneTimeItem(itemId) {
+  try {
+    const response = await fetch(`${STATE.basePath}/consume/${encodeURIComponent(itemId)}`, {
+      method: "POST",
+      headers: { "Accept": "application/json", "X-Requested-With": "XMLHttpRequest" }
+    });
+    if (!response.ok) throw new Error("This one-time item was already used or could not be removed.");
+    showToast("One-time item removed from this session.");
+    await pollState();
+  } catch (error) {
+    showError(error.message || "Could not remove the one-time item.");
+  }
+}
+
+function laptopOpenUrlAction(item) {
+  if (STATE.role !== "laptop" || item.sender !== "phone" || item.kind !== "text") return "";
+  const rawUrl = String(item.text_content || "").match(/https?:\/\/[^\s<>"']+/i)?.[0]
+    ?.replace(/[),.;!?]+$/, "");
+  if (!rawUrl) return "";
+  try {
+    const url = new URL(rawUrl);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return "";
+  } catch (_) {
+    return "";
+  }
+  return `<button type="button" class="btn btn-outline btn-sm" onclick="openUrlOnLaptop('${escapeHtml(item.id)}')">Open Tab on Laptop</button>`;
+}
+
+async function openUrlOnLaptop(itemId) {
+  const item = (STATE.items || []).find(candidate => candidate.id === itemId);
+  if (!item || item.sender !== "phone") return;
+  const url = String(item.text_content || "").match(/https?:\/\/[^\s<>"']+/i)?.[0]
+    ?.replace(/[),.;!?]+$/, "");
+  if (!url) return;
+  try {
+    const response = await fetch(`${STATE.basePath}/open-url`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json", "X-Requested-With": "XMLHttpRequest" },
+      body: JSON.stringify({ url })
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Could not open link on laptop.");
+    showToast("Opened a new tab on the laptop.");
+  } catch (error) {
+    showError(error.message || "Could not open link on laptop.");
+  }
+}
+
+async function browseZip(itemId) {
+  const modal = document.getElementById("zipBrowserModal");
+  const title = document.getElementById("zipBrowserTitle");
+  const status = document.getElementById("zipBrowserStatus");
+  const list = document.getElementById("zipEntryList");
+  const item = (STATE.items || []).find(candidate => candidate.id === itemId);
+  if (!item || item.kind !== "zip") return;
+  title.textContent = item.name;
+  status.textContent = "Reading archive contents…";
+  list.replaceChildren();
+  modal.classList.add("open");
+  try {
+    const response = await fetch(`${STATE.basePath}/zip?id=${encodeURIComponent(itemId)}`, { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Could not browse this ZIP.");
+    status.textContent = `${data.entries.length} files`;
+    if (data.entries.length === 0) {
+      list.textContent = "No safe, downloadable files were found in this archive.";
+      return;
+    }
+    list.innerHTML = data.entries.map(entry => `
+      <div class="zip-entry-row">
+        <div><strong>${escapeHtml(entry.name)}</strong><small>${escapeHtml(entry.size_human)}</small></div>
+        ${entry.downloadable
+          ? `<a class="btn btn-outline btn-sm" href="${STATE.basePath}/zip/file?id=${encodeURIComponent(itemId)}&entry=${encodeURIComponent(entry.index)}">Download</a>`
+          : `<span class="zip-entry-limit">Over session file limit</span>`}
+      </div>
+    `).join("");
+  } catch (error) {
+    status.textContent = error.message || "Could not browse this ZIP.";
+  }
+}
+
+function closeZipBrowser() {
+  document.getElementById("zipBrowserModal").classList.remove("open");
 }
 
 function renderItemCard(item) {
@@ -488,6 +579,7 @@ function renderItemCard(item) {
           <a class="btn btn-outline btn-sm" href="${escapeHtml(item.download_url)}" download="${escapeHtml(item.name)}">
             <span>Save .txt</span>
           </a>
+          ${laptopOpenUrlAction(item)}
           ${inboxSaveAction(item)}
         </div>
       `;
@@ -510,7 +602,8 @@ function renderItemCard(item) {
       </div>
     `;
   } else if (isMediaPreviewable(item)) {
-    const isVideo = ["mp4", "webm"].includes(item.name.split(".").pop().toLowerCase());
+    const isVideo = item.mime.startsWith("video/")
+      || (["mp4", "webm"].includes(item.name.split(".").pop().toLowerCase()) && !item.mime.startsWith("audio/"));
     bodyHtml = `
       <div class="transfer-body">
         <div class="media-stage">
@@ -529,6 +622,7 @@ function renderItemCard(item) {
   } else if (item.kind === "zip") {
     actionsHtml = `
       <div class="transfer-actions">
+        <button type="button" class="btn btn-outline btn-sm" onclick="browseZip('${escapeHtml(item.id)}')">Browse Contents</button>
         ${inboxSaveAction(item)}
         <a class="btn btn-primary btn-sm" href="${escapeHtml(item.download_url)}" download="${escapeHtml(item.name)}">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -647,14 +741,58 @@ async function goHomeScreen() {
       headers: { "Accept": "application/json", "X-Requested-With": "XMLHttpRequest" }
     });
   } catch (_) {}
+  activeWorkspaceView = "sharing";
+  window.history.replaceState({ quickshareView: "sharing" }, "", `${window.location.pathname}${window.location.search}`);
   STATE.screen = "home";
   updateUI();
 }
+
+function navigateWorkspace(view, updateHistory = true) {
+  if (!WORKSPACE_VIEWS.includes(view)) return;
+  const changed = activeWorkspaceView !== view;
+  activeWorkspaceView = view;
+  if (updateHistory && changed) {
+    const hash = view === "sharing" ? "" : `#${view}`;
+    window.history.pushState({ quickshareView: view }, "", `${window.location.pathname}${window.location.search}${hash}`);
+  }
+  updateUI();
+  if (changed) {
+    const pageId = {
+      sharing: "workspaceScreen",
+      transfers: "transfersScreen",
+      scratchpad: "scratchpadScreen",
+      connect: "connectScreen",
+      controls: "connectScreen",
+      devices: "devicesScreen"
+    }[view];
+    const page = document.getElementById(pageId);
+    const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
+    page?.scrollIntoView({ behavior, block: "start" });
+    page?.classList.remove("page-enter");
+    requestAnimationFrame(() => page?.classList.add("page-enter"));
+    window.setTimeout(() => page?.classList.remove("page-enter"), 350);
+  }
+}
+
+window.addEventListener("popstate", () => {
+  const view = window.location.hash.slice(1);
+  activeWorkspaceView = WORKSPACE_VIEWS.includes(view) ? view : "sharing";
+  updateUI();
+});
 
 function updateUI() {
   const isLaptop = STATE.role === "laptop";
   document.getElementById("roleBadge").textContent = isLaptop ? "LAPTOP HUB" : "MOBILE HUB";
   document.getElementById("stopAppBtn").style.display = isLaptop ? "inline-flex" : "none";
+  document.getElementById("cameraCaptureBtn").hidden = isLaptop;
+  document.getElementById("voiceNotePanel").hidden = isLaptop;
+  document.getElementById("laptopRemotePanel").hidden = isLaptop;
+  document.getElementById("connectPageEyebrow").textContent = isLaptop ? "PAIR A PHONE" : "LAPTOP CONTROLS";
+  document.getElementById("connectPageTitle").textContent = isLaptop ? "Connect your phone" : "Control your laptop";
+  document.getElementById("connectPageSubtitle").textContent = isLaptop
+    ? "Scan the QR code or open the link on your phone to start sharing."
+    : "Take a quick look at your laptop or control media and presentations.";
+  renderDeviceApprovals(STATE.pendingDevices || [], STATE.trustedDevices || []);
 
   const homeUrlEl = document.getElementById("homePhoneUrl");
   if (homeUrlEl) homeUrlEl.textContent = STATE.phoneUrl || "";
@@ -689,19 +827,66 @@ function updateUI() {
   document.getElementById("clipboardBtnLabel").textContent = "Clipboard";
 
   const homeEl = document.getElementById("homeScreen");
-  const wsEl = document.getElementById("workspaceScreen");
+  const navigationEl = document.getElementById("workspaceNavigation");
   const backBtn = document.getElementById("backHomeBtn");
+  const workspacePageIds = {
+    sharing: "workspaceScreen",
+    transfers: "transfersScreen",
+    scratchpad: "scratchpadScreen",
+    connect: "connectScreen",
+    controls: "connectScreen",
+    devices: "devicesScreen"
+  };
+  const isHome = isLaptop && STATE.screen === "home" && !STATE.phoneConnected && (STATE.items || []).length === 0;
 
-  if (isLaptop && STATE.screen === "home" && !STATE.phoneConnected && (STATE.items || []).length === 0) {
+  if (isHome) {
     homeEl.style.display = "block";
-    wsEl.style.display = "none";
+    navigationEl.hidden = true;
     document.getElementById("toggleQrBtn").style.display = "none";
+    for (const pageId of new Set(Object.values(workspacePageIds))) {
+      const page = document.getElementById(pageId);
+      if (pageId === "workspaceScreen") {
+        page.style.display = "none";
+      } else {
+        page.hidden = true;
+      }
+    }
     if (backBtn) backBtn.style.display = "none";
   } else {
     homeEl.style.display = "none";
-    wsEl.style.display = "grid";
+    navigationEl.hidden = false;
+    for (const pageId of new Set(Object.values(workspacePageIds))) {
+      const page = document.getElementById(pageId);
+      const isActivePage = workspacePageIds[activeWorkspaceView] === pageId;
+      if (pageId === "workspaceScreen") {
+        page.style.display = isActivePage ? "grid" : "none";
+      } else {
+        page.hidden = !isActivePage;
+      }
+    }
+    document.getElementById("sharingNavBtn").hidden = false;
+    document.getElementById("transfersNavBtn").hidden = false;
+    document.getElementById("scratchpadNavBtn").hidden = false;
+    document.getElementById("connectNavBtn").hidden = !isLaptop;
+    document.getElementById("controlsNavBtn").hidden = isLaptop;
+    document.getElementById("devicesNavBtn").hidden = !isLaptop;
+    document.getElementById("connectNavLabel").textContent = isLaptop ? "Connect" : "Controls";
+    for (const view of WORKSPACE_VIEWS) {
+      const buttonId = {
+        sharing: "sharingNavBtn",
+        transfers: "transfersNavBtn",
+        scratchpad: "scratchpadNavBtn",
+        connect: "connectNavBtn",
+        controls: "controlsNavBtn",
+        devices: "devicesNavBtn"
+      }[view];
+      const button = document.getElementById(buttonId);
+      button.classList.toggle("active", view === activeWorkspaceView);
+      button.setAttribute("aria-current", view === activeWorkspaceView ? "page" : "false");
+    }
+    document.getElementById("toggleQrBtn").style.display =
+      isLaptop && activeWorkspaceView === "connect" ? "inline-flex" : "none";
     if (isLaptop) {
-      document.getElementById("toggleQrBtn").style.display = "inline-flex";
       if (backBtn) {
         backBtn.style.display = (!STATE.phoneConnected && (STATE.items || []).length === 0) ? "inline-flex" : "none";
       }
@@ -709,7 +894,7 @@ function updateUI() {
         qrVisible = !STATE.phoneConnected;
       }
       const qrPanel = document.getElementById("qrPanel");
-      qrPanel.style.display = qrVisible ? "block" : "none";
+      qrPanel.style.display = activeWorkspaceView === "connect" && qrVisible ? "block" : "none";
       document.getElementById("toggleQrLabel").textContent = qrVisible ? "Hide QR" : "Show QR";
       if (STATE.qrDataUri) {
         document.getElementById("qrImage").src = STATE.qrDataUri;
@@ -719,6 +904,79 @@ function updateUI() {
   }
 
   renderFeed(false);
+}
+
+function renderDeviceApprovals(devices, trustedDevices) {
+  const list = document.getElementById("deviceApprovalList");
+  const savedList = document.getElementById("trustedDevicesList");
+  if (!list || !savedList || STATE.role !== "laptop") {
+    return;
+  }
+  const requestEmpty = document.getElementById("deviceRequestsEmpty");
+  const trustedEmpty = document.getElementById("trustedDevicesEmpty");
+  const requestCount = document.getElementById("deviceRequestsSectionCount");
+  const trustedCount = document.getElementById("trustedDevicesSectionCount");
+  const navCount = document.getElementById("pendingDevicesCount");
+  requestEmpty.hidden = devices.length > 0;
+  trustedEmpty.hidden = trustedDevices.length > 0;
+  requestCount.textContent = `${devices.length} ${devices.length === 1 ? "request" : "requests"}`;
+  trustedCount.textContent = `${trustedDevices.length} ${trustedDevices.length === 1 ? "device" : "devices"}`;
+  navCount.hidden = devices.length === 0;
+  navCount.textContent = String(devices.length);
+  list.innerHTML = devices.map(device => `
+    <div class="approval-request">
+      <div><strong>${escapeHtml(device.name)}</strong><small>Request from ${escapeHtml(device.ip)}</small></div>
+      <div class="approval-actions">
+        <button type="button" class="btn btn-outline btn-xs" onclick="decidePhoneApproval('${escapeHtml(device.id)}', 'once')">Allow once</button>
+        <button type="button" class="btn btn-primary btn-xs" onclick="decidePhoneApproval('${escapeHtml(device.id)}', 'remember')">Remember</button>
+        <button type="button" class="btn btn-outline btn-xs" onclick="decidePhoneApproval('${escapeHtml(device.id)}', false)">Deny</button>
+      </div>
+    </div>
+  `).join("");
+  savedList.innerHTML = trustedDevices.map(device => `
+    <div class="approval-request">
+      <div><strong>${escapeHtml(device.name)}</strong><small>Remembered ${escapeHtml(device.approved_at || "previously")}</small></div>
+      <div class="approval-actions">
+        <button type="button" class="btn btn-outline btn-xs" onclick="forgetPhoneDevice('${escapeHtml(device.id)}')">Forget device</button>
+      </div>
+    </div>
+  `).join("");
+}
+
+async function decidePhoneApproval(deviceId, decision) {
+  try {
+    const action = decision === "remember" ? "remember" : decision === "once" ? "approve" : "deny";
+    const response = await fetch(`${STATE.basePath}/${action}-device/${encodeURIComponent(deviceId)}`, {
+      method: "POST",
+      headers: { "Accept": "application/json", "X-Requested-With": "XMLHttpRequest" }
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Could not update device approval.");
+    showToast(decision === "remember"
+      ? "Phone remembered on this laptop."
+      : decision === "once"
+        ? "Phone approved for this session."
+        : "Phone request denied.");
+    await pollState();
+  } catch (error) {
+    showError(error.message || "Could not update device approval.");
+  }
+}
+
+async function forgetPhoneDevice(deviceId) {
+  if (!window.confirm("Forget this phone? It will need approval the next time it connects.")) return;
+  try {
+    const response = await fetch(`${STATE.basePath}/forget-device/${encodeURIComponent(deviceId)}`, {
+      method: "POST",
+      headers: { "Accept": "application/json", "X-Requested-With": "XMLHttpRequest" }
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Could not forget this device.");
+    showToast("Remembered phone removed.");
+    await pollState();
+  } catch (error) {
+    showError(error.message || "Could not forget this device.");
+  }
 }
 
 async function startWorkspace(mode) {
@@ -793,26 +1051,123 @@ async function sendTextMessage() {
   }
   const fd = new FormData();
   fd.append("message", text);
-  await performFormDataUpload(fd, "Sending text…");
+  if (document.getElementById("burnAfterRead").checked) {
+    fd.append("burn_after_read", "1");
+  }
+  const sent = await performFormDataUpload(fd, "Sending text…");
+  if (!sent) return;
   if (ta) {
     ta.value = "";
     updateCharCounter();
+  }
+  document.getElementById("burnAfterRead").checked = false;
+}
+
+async function toggleVoiceNote() {
+  const button = document.getElementById("voiceRecordBtn");
+  const label = document.getElementById("voiceRecordLabel");
+  const status = document.getElementById("voiceRecordStatus");
+  if (voiceRecorder && voiceRecorder.state === "recording") {
+    button.disabled = true;
+    label.textContent = "Finishing…";
+    voiceRecorder.stop();
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    showError("Voice notes need microphone recording support. Open QuickShare over trusted HTTPS and use a supported browser.");
+    return;
+  }
+  try {
+    voiceRecorderStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const supportedTypes = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"];
+    const mimeType = supportedTypes.find(type => MediaRecorder.isTypeSupported(type));
+    voiceRecorderChunks = [];
+    voiceRecorder = new MediaRecorder(voiceRecorderStream, mimeType ? { mimeType } : undefined);
+    voiceRecorder.addEventListener("dataavailable", event => {
+      if (event.data.size) voiceRecorderChunks.push(event.data);
+    });
+    voiceRecorder.addEventListener("stop", async () => {
+      const actualMime = voiceRecorder.mimeType || mimeType || "audio/webm";
+      const extension = actualMime.includes("ogg") ? "ogg" : actualMime.includes("mp4") ? "m4a" : "webm";
+      const audio = new File(
+        voiceRecorderChunks,
+        `voice-note-${new Date().toISOString().replace(/[:.]/g, "-")}.${extension}`,
+        { type: actualMime }
+      );
+      voiceRecorderStream?.getTracks().forEach(track => track.stop());
+      voiceRecorderStream = null;
+      voiceRecorder = null;
+      voiceRecorderChunks = [];
+      button.disabled = false;
+      label.textContent = "Record voice note";
+      status.textContent = "Uploading voice note…";
+      const uploaded = await uploadSelectedFiles([audio], false);
+      status.textContent = uploaded ? "Voice note sent." : "Could not upload the voice note.";
+    });
+    voiceRecorder.start();
+    button.classList.add("recording");
+    label.textContent = "Stop & send voice note";
+    status.textContent = "Recording… tap stop when finished.";
+    button.addEventListener("click", () => button.classList.remove("recording"), { once: true });
+  } catch (error) {
+    voiceRecorderStream?.getTracks().forEach(track => track.stop());
+    voiceRecorderStream = null;
+    button.disabled = false;
+    label.textContent = "Record voice note";
+    status.textContent = "Microphone permission was not granted.";
+    showError(error.message || "Could not start microphone recording.");
+  }
+}
+
+async function remoteAction(action) {
+  const status = document.getElementById("remoteActionStatus");
+  status.textContent = "Sending command…";
+  try {
+    const response = await fetch(`${STATE.basePath}/remote/${encodeURIComponent(action)}`, {
+      method: "POST",
+      headers: { "Accept": "application/json", "X-Requested-With": "XMLHttpRequest" }
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Laptop control failed.");
+    status.textContent = "Command sent.";
+  } catch (error) {
+    status.textContent = error.message || "Laptop control failed.";
+  }
+}
+
+async function viewLaptopScreen() {
+  const status = document.getElementById("remoteActionStatus");
+  const image = document.getElementById("remoteScreenPreview");
+  status.textContent = "Capturing laptop screen…";
+  try {
+    const response = await fetch(`${STATE.basePath}/remote/screenshot`, { cache: "no-store" });
+    if (!response.ok) {
+      const data = await response.json();
+      throw new Error(data.error || "Could not capture laptop screen.");
+    }
+    if (remoteScreenObjectUrl) URL.revokeObjectURL(remoteScreenObjectUrl);
+    remoteScreenObjectUrl = URL.createObjectURL(await response.blob());
+    image.src = remoteScreenObjectUrl;
+    image.hidden = false;
+    status.textContent = "Laptop screen captured. Tap the image to enlarge.";
+  } catch (error) {
+    status.textContent = error.message || "Could not capture laptop screen.";
   }
 }
 
 async function uploadSelectedFiles(fileList, isFolder) {
   showError("");
-  if (!fileList || fileList.length === 0) return;
+  if (!fileList || fileList.length === 0) return false;
   const fileBytes = Array.from(fileList).reduce((total, file) => total + file.size, 0);
   const requestBytes = fileBytes + fileList.length * 1024 + 4096;
   if (requestBytes > STATE.maxUploadMib * 1024 ** 2) {
     showError(`Selected files exceed the ${STATE.maxUploadMib} MiB upload limit.`);
-    return;
+    return false;
   }
   const requiredDiskBytes = requestBytes * (STATE.saveInbox ? 3 : 2);
   if (Number.isFinite(STATE.freeDiskBytes) && requiredDiskBytes > STATE.freeDiskBytes) {
     showError(`Upload may need up to ${formatBytes(requiredDiskBytes)} temporary storage; ${formatBytes(STATE.freeDiskBytes)} is available.`);
-    return;
+    return false;
   }
   const fd = new FormData();
   if (isFolder) {
@@ -829,7 +1184,7 @@ async function uploadSelectedFiles(fileList, isFolder) {
   const label = isFolder
     ? `Packing & sending folder (${fileList.length} files)…`
     : `Sending ${fileList.length} file${fileList.length > 1 ? "s" : ""}…`;
-  await performFormDataUpload(fd, label, isFolder ? "/folder" : "/upload");
+  return performFormDataUpload(fd, label, isFolder ? "/folder" : "/upload");
 }
 
 function getPastedImageFiles(clipboardData) {
@@ -907,19 +1262,21 @@ function performFormDataUpload(formData, labelText, endpoint = "/upload") {
         if (xhr.status >= 200 && xhr.status < 300 && data.ok) {
           showToast("Shared! Ready in the session feed.");
           await pollState();
+          resolve(true);
         } else {
           showError(data.error || "Upload failed.");
+          resolve(false);
         }
       } catch (_) {
         showError("Upload failed.");
+        resolve(false);
       }
-      resolve();
     };
 
     xhr.onerror = () => {
       wrap.classList.remove("active");
       showError("Network error while uploading.");
-      resolve();
+      resolve(false);
     };
 
     xhr.send(formData);
@@ -965,6 +1322,8 @@ async function pollState() {
     STATE.phoneConnected = data.phone_connected;
     STATE.screen = STATE.role === "laptop" ? data.screen : "workspace";
     STATE.items = data.items || [];
+    STATE.pendingDevices = data.pending_devices || [];
+    STATE.trustedDevices = data.trusted_devices || [];
     STATE.freeDiskBytes = Number(data.free_disk_bytes) || 0;
     document.getElementById("storageInfo").textContent =
       `Laptop storage available: ${formatBytes(STATE.freeDiskBytes)}`;

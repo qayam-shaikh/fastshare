@@ -2,6 +2,33 @@
 
 QuickShare is an on-demand, **two-way** file and text sharing web app for an Ubuntu laptop and a phone on the same Wi-Fi network.
 
+## Setup and start
+
+Requirements: Ubuntu/Linux, Python 3, and a phone and laptop on the same Wi-Fi network. From a terminal in the cloned repository:
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+./quickshare
+```
+
+The terminal prints the laptop and phone URLs and a QR code. Scan the QR code or open the phone URL on your phone. If the phone cannot connect, use the displayed IP fallback and check that the laptop firewall allows the selected QuickShare port (default `8765`) on your trusted local network. Run `./quickshare --help` to see options; press `Ctrl+C` or use **Stop Session** to end sharing.
+
+Choose **Send to Phone** or **Receive from Phone** on the laptop. Both devices can send and receive throughout the active session. Files are held in the local session and cleared when the session ends; QuickShare does not upload them to a cloud service.
+
+## Navigate the app
+
+The workspace is split into focused pages so the sharing controls, transfer feed, scratchpad, and connection tools are not all shown together:
+
+- **Share**: choose files, images, folders, camera capture, or text to send.
+- **Transfers**: review shared items, preview supported files, and download items.
+- **Scratchpad**: collaborate on a live-synced note.
+- **Connect** on the laptop: scan the QR code or copy the phone link. On the phone, this page is **Controls** for laptop screenshots, media, volume, and slides.
+- **Devices** on the laptop: approve new phones and manage remembered devices.
+
+Pages have bookmarkable in-app URLs and support browser back/forward navigation. On a phone, the page navigation adapts to its available actions.
+
 ## Wi-Fi Independent Bookmark URLs (No Hardcoded IP)
 
 QuickShare binds to port `8765` and automatically uses **mDNS (`.local` ZeroConf/Avahi)** so your bookmark URLs stay the same even when you connect to a different Wi-Fi network or hotspot:
@@ -20,6 +47,8 @@ On the Laptop Hub, copy a screenshot to the clipboard (for example with `PrtSc` 
 
 Shared text snippets automatically linkify web URLs, email addresses, and phone numbers. Tap a web link to open it in the mobile browser, an email address to compose a message, or a phone number to open the phone's dialer. The original text can still be copied with **Copy to Clipboard**.
 
+When a phone shares a text snippet containing a web URL, the laptop feed also offers **Open Tab on Laptop**. It opens the validated HTTP(S) link in the laptop's default browser.
+
 ## Download received items together
 
 When at least two items have been received on a device, use **Download All (ZIP)** above the session feed to download them as one archive.
@@ -30,7 +59,28 @@ Click a `.pdf`, `.md`, `.json`, or `.py` item in the session feed to preview it 
 
 ## Live scratchpad and media previews
 
-Use the **Live Scratchpad** tab to draft or paste text on either device; changes sync to the other device while the session is open. Received `.mp4`, `.webm`, `.mp3`, and `.wav` files have inline playback controls and still retain their download action.
+Open **Scratchpad** to draft or paste text on either device; changes sync while the session is open. Received `.mp4`, `.webm`, `.mp3`, and `.wav` files have inline playback controls and still retain their download action in **Transfers**.
+
+## Phone capture, voice notes, and laptop controls
+
+- On the phone, tap **Snap Photo** to open the rear camera and upload the captured image.
+- Tap **Record voice note**, grant microphone access, then tap **Stop & send voice note** to upload the recording. Browser microphone APIs generally require QuickShare to be served over trusted HTTPS; the browser will also ask for microphone permission.
+- On the phone, open **Controls** to request a screenshot, toggle media playback, adjust volume, or move presentation slides. The corresponding desktop tools are optional: `grim` (Wayland), `gnome-screenshot` or `scrot` (screenshots), `playerctl` (media), `pactl` (volume), and `xdotool` (slides). The UI reports when a tool is unavailable. Screenshot capture depends on the laptop's active desktop session.
+- Shared folders are represented as ZIP archives. Use **Browse Contents** on a ZIP or folder card to inspect safe entries and download an individual file without downloading the whole archive.
+
+## Approve and remember phones
+
+On the laptop, open **Devices** from the page navigation to manage phone access. When a new phone connects, it waits for approval there:
+
+- Choose **Allow once** to authorize the phone only until QuickShare stops.
+- Choose **Remember** to allow that browser on future sessions. Saved trust is kept on the laptop in `~/.config/quickshare/trusted_devices.json` with restrictive file permissions; only a hash of the phone's browser token is stored.
+- Use **Forget device** in the laptop's **Remembered devices** list to revoke and remove a saved phone. A forgotten phone must be approved again.
+
+The phone's browser keeps its device token in a long-lived, HttpOnly cookie. Remembering therefore applies to the same browser profile and QuickShare site address. To keep trust when changing Wi-Fi, open QuickShare using its stable `.local` hostname rather than a changing fallback IP address. Clearing browser cookies/site data, using a different browser profile, or changing the site hostname/IP can require approval again. Use HTTPS on networks you do not trust; anyone with access to the phone's browser profile may use its remembered authorization.
+
+## Send one-time text
+
+Before sending a text snippet, optionally enable **Self-destruct after one use**. The item is removed from the session when the other device successfully copies it or downloads its text file. This is a convenience for transient sharing, not an encrypted vault: use a trusted network, and do not treat it as a substitute for end-to-end encryption or secure secret storage.
 
 ## Send files directly from the terminal
 
