@@ -102,6 +102,43 @@ The batch file passes command-line options through to the app. To install or ref
 
    Keep the terminal open while sharing. Scan the displayed QR code or open the printed phone URL on Android. If the launcher is not executable, run `chmod +x quickshare` once, then start it again.
 
+## Make QuickShare one tap away
+
+After the first setup, you can start a session from a keyboard shortcut on the laptop and open the phone page from an Android home-screen icon. The laptop shortcut starts QuickShare and opens its laptop page in your browser; leave the terminal or command window open while you use it.
+
+### Ubuntu laptop shortcut
+
+1. Open **Settings → Keyboard → View and Customize Shortcuts → Custom Shortcuts** (the wording can vary slightly by Ubuntu version), then choose **Add Shortcut**.
+2. Name it **QuickShare**. Set the command to the following, replacing `/path/to/fastshare` with the full path to your cloned project:
+
+   ```bash
+   gnome-terminal --working-directory="/path/to/fastshare" -- bash -lc './quickshare; exec bash'
+   ```
+
+3. Save the shortcut, click its key binding, and press **Ctrl+Alt+Q**. If Ubuntu reports that the key combination is already in use, choose another one.
+4. Press **Ctrl+Alt+Q** to start a session. QuickShare prints a QR code and phone URL in the terminal and opens the laptop page in your browser.
+
+### Windows laptop shortcut
+
+1. In File Explorer, open the project folder, right-click `quickshare.bat`, and choose **Show more options → Create shortcut** (or **Send to → Desktop (create shortcut)**).
+2. Right-click the new shortcut, choose **Properties**, and set **Target** to:
+
+   ```text
+   C:\Windows\System32\cmd.exe /k ""C:\path\to\fastshare\quickshare.bat""
+   ```
+
+   Replace the example path with the full path to your project folder. Set **Start in** to that folder as well.
+3. Optionally set a key in **Shortcut key** (for example, **Ctrl+Alt+Q**) and choose **Apply**. Windows may reserve the combination or require the shortcut to remain on the Desktop or in the Start menu.
+4. Open the shortcut to start QuickShare. The command window shows the QR code and phone URL, and QuickShare opens the laptop page in your browser. Keep the window open until you stop sharing.
+
+### Android home-screen shortcut
+
+1. Start QuickShare on the laptop and connect the phone to the same Wi-Fi network.
+2. On Android Chrome, open the phone URL printed by QuickShare, approve the phone on the laptop if prompted, and choose **Remember** if you want it to reconnect in future sessions.
+3. In Chrome, open the **⋮** menu and choose **Add to Home screen** or **Install app**. Name it **QuickShare** and confirm. Tap its icon next time to open the phone page.
+
+The app must be running on the laptop for the phone shortcut to work. The default port is `8765`, so the stable `http://quickshare.local:8765/phone` address is convenient when your network resolves `quickshare.local`; otherwise use the current IP-based phone URL printed by QuickShare. If you change the port, update the saved shortcut URL. Android may treat the `.local` and IP addresses as different sites, so a saved device approval may not carry over between them.
+
 ## Connect the phone
 
 1. Start QuickShare on the laptop and leave it running.
