@@ -144,7 +144,9 @@ class QuickShareServerTests(unittest.TestCase):
     def test_pages_load(self) -> None:
         laptop_response = self.request("/laptop")
         self.assertEqual(laptop_response.status, 200)
-        self.assertIn(b"Laptop Hub", laptop_response.read())
+        laptop_page = laptop_response.read()
+        self.assertIn(b"Laptop Hub", laptop_page)
+        self.assertIn(b"data:image/png;base64,iVBORw0KGgo", laptop_page)
 
         phone_response = self.request("/phone")
         self.assertEqual(phone_response.status, 200)

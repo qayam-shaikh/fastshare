@@ -1,6 +1,35 @@
 #!/usr/bin/env bash
-# On-demand QuickShare launcher. It deliberately does not install a service.
+# On-demand QuickShare launcher. It bootstraps local dependencies but installs no service.
 set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_dir"
-exec python3 "$script_dir/quickshare.py" "$@"
+
+python_cmd="${PYTHON:-python3}"
+if ! command -v "$python_cmd" >/dev/null 2>&1; then
+  echo "Python 3.10 or newer is required. Install python3 and python3-venv, then retry." >&2
+  exit 1
+fi
+
+if ! "$python_cmd" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+  echo "QuickShare requires Python 3.10 or newer." >&2
+  exit 1
+fi
+
+venv_python="$script_dir/.venv/bin/python"
+if [[ ! -x "$venv_python" ]]; then
+  if ! "$python_cmd" -m venv "$script_dir/.venv"; then
+    echo "Could not create .venv. On Ubuntu, install it with: sudo apt install python3-venv" >&2
+    exit 1
+  fi
+fi
+
+dependency_marker="$script_dir/.venv/quickshare-dependencies-installed"
+if [[ ! -f "$dependency_marker" ]]; then
+  if ! "$venv_python" -m pip install -r "$script_dir/requirements.txt"; then
+    echo "QuickShare dependency installation failed. Check your internet connection and retry." >&2
+    exit 1
+  fi
+  : > "$dependency_marker"
+fi
+
+exec "$venv_python" "$script_dir/quickshare.py" "$@"

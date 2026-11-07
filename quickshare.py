@@ -37,6 +37,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import BinaryIO
 
+import qrcode
+
 MIB = 1024 * 1024
 MAX_CLIPBOARD_CHARS = 2000
 
@@ -2135,34 +2137,12 @@ setInterval(checkApproval,1500);
                 archive_path.unlink(missing_ok=True)
 
     def qr_data_uri(self) -> str:
-        vendor = Path(__file__).with_name(".quickshare_vendor")
-        if vendor.is_dir() and str(vendor) not in sys.path:
-            sys.path.append(str(vendor))
-        try:
-            import qrcode
-
-            image = qrcode.make(self.phone_url())
-            output = BytesIO()
-            image.save(output, format="PNG")
-            return "data:image/png;base64," + base64.b64encode(
-                output.getvalue()
-            ).decode("ascii")
-        except Exception:
-            try:
-                import qrcode
-                import qrcode.image.svg
-
-                image = qrcode.make(
-                    self.phone_url(),
-                    image_factory=qrcode.image.svg.SvgPathImage,
-                )
-                output = BytesIO()
-                image.save(output)
-                return "data:image/svg+xml;base64," + base64.b64encode(
-                    output.getvalue()
-                ).decode("ascii")
-            except Exception:
-                return ""
+        image = qrcode.make(self.phone_url())
+        output = BytesIO()
+        image.save(output, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(
+            output.getvalue()
+        ).decode("ascii")
 
     def phone_url(self) -> str:
         return f"{self.server.state.scheme}://{self.server.state.mdns_host}:{self.server.server_port}{self.phone_path()}"

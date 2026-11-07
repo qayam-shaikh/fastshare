@@ -35,6 +35,8 @@ QuickShare is a private, two-way file and text sharing app for an **Ubuntu or Wi
 
 Choose **one** of the laptop setup guides below. QuickShare creates a temporary session when launched; it does not install a background service.
 
+QuickShare installs its Python libraries from `requirements.txt`: `qrcode` generates the laptop’s phone-link QR code, and Pillow supports QR images and Windows screenshots. Both platform launchers create a local `.venv` and install the listed libraries automatically the first time you start the app. You need internet access for that first dependency installation.
+
 ### Windows 10/11
 
 1. Install Python 3.10 or newer from [python.org/downloads/windows](https://www.python.org/downloads/windows/). In the installer, enable **Add python.exe to PATH** and include the **Python Launcher** if offered.
@@ -85,22 +87,19 @@ The batch file passes command-line options through to the app. To install or ref
    cd fastshare
    ```
 
-3. Create and activate a virtual environment, then install the dependencies:
-
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   python -m pip install --upgrade pip
-   python -m pip install -r requirements.txt
-   ```
-
-4. Start the app:
+3. Start the app:
 
    ```bash
    ./quickshare
    ```
 
-   Keep the terminal open while sharing. Scan the displayed QR code or open the printed phone URL on Android. If the launcher is not executable, run `chmod +x quickshare` once, then start it again.
+   The first launch creates `.venv` and installs the dependencies; later launches reuse them. Keep the terminal open while sharing. Scan the displayed QR code or open the printed phone URL on Android. If the launcher is not executable, run `chmod +x quickshare` once, then start it again.
+
+To install or refresh dependencies manually, run:
+
+```bash
+.venv/bin/python -m pip install -r requirements.txt
+```
 
 ## Make QuickShare one tap away
 
@@ -268,8 +267,7 @@ fastshare/
 ├── quickshare                 # Ubuntu launcher
 ├── quickshare.bat             # Windows launcher; bootstraps a local venv
 ├── quickshare.py              # Python HTTP server and platform integrations
-├── requirements.txt           # Cross-platform Python dependencies
-├── .quickshare_vendor/        # Bundled QR-code fallback
+├── requirements.txt           # QR, image, and platform dependencies
 ├── frontend/
 │   ├── index.html             # Laptop and phone app pages
 │   ├── styles.css             # Responsive styling
