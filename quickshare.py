@@ -211,7 +211,6 @@ class MdnsPublisher:
                 )
                 time.sleep(0.15)
                 if self.proc.poll() is None:
-                    self.active_hostname = self.alias
                     return self.active_hostname
             except OSError:
                 self.proc = None
@@ -231,10 +230,9 @@ class MdnsPublisher:
                         "QuickShare._http._tcp.local.",
                         addresses=[socket.inet_aton(self.bind_ip)],
                         port=port,
-                        server=f"{self.alias}.",
+                        server=f"{self.mdns_host}.",
                     )
                     self.zeroconf.register_service(self.service_info)
-                    self.active_hostname = self.alias
             except (OSError, ZeroconfError) as error:
                     if self.zeroconf is not None:
                         self.zeroconf.close()
@@ -1037,6 +1035,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
 
+    def canonical_phone_redirect(self, path: str) -> str | None:
+        state = self.server.state
+        host_header = self.headers.get("Host", "")
+        try:
+            request_host = urllib.parse.urlsplit(f"//{host_header}").hostname
+        except ValueError:
+            return None
+        if (
+            not request_host
+            or request_host.rstrip(".").casefold()
+            == state.mdns_host.rstrip(".").casefold()
+        ):
+            return None
+        parsed_request = urllib.parse.urlsplit(self.path)
+        location = f"{state.scheme}://{state.mdns_host}:{self.server.server_port}{path}"
+        return f"{location}?{parsed_request.query}" if parsed_request.query else location
+
     def deny(
         self, status: HTTPStatus = HTTPStatus.NOT_FOUND, message: str = "Not found"
     ) -> None:
@@ -1084,6 +1099,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.deny()
 
         if self.is_phone(path):
+            canonical_url = self.canonical_phone_redirect(path)
+            if canonical_url:
+                return self.redirect(canonical_url)
             suffix = path[len(self.phone_path()) :]
             if suffix == "/manifest.json":
                 return self.serve_manifest()

@@ -37,6 +37,8 @@ let voiceRecorderStream = null;
 let voiceRecorderChunks = [];
 let remoteScreenObjectUrl = "";
 
+document.documentElement.dataset.role = STATE.role;
+
 function isMediaPreviewable(item) {
   const extension = item.name.split(".").pop().toLowerCase();
   return ["audio/", "video/"].some(type => item.mime.startsWith(type))
@@ -184,6 +186,11 @@ function openLightbox(url) {
   if (!lb || !img) return;
   img.src = url;
   lb.classList.add("open");
+}
+
+function openImagePreview(itemId) {
+  const item = (STATE.items || []).find(candidate => candidate.id === itemId);
+  if (item?.kind === "image" && item.preview_url) openLightbox(item.preview_url);
 }
 
 function closeLightbox() {
@@ -529,6 +536,9 @@ function renderItemCard(item) {
 
   let bodyHtml = "";
   let actionsHtml = "";
+  const imageThumbnail = item.kind === "image"
+    ? `<button type="button" class="image-thumb-button" onclick="openImagePreview('${escapeHtml(item.id)}')" aria-label="View full image: ${escapeHtml(item.name)}"><img src="${escapeHtml(item.preview_url)}" alt="" loading="lazy"></button>`
+    : "";
 
   if (item.kind === "text") {
     if (item.text_too_long) {
@@ -585,13 +595,6 @@ function renderItemCard(item) {
       `;
     }
   } else if (item.kind === "image") {
-    bodyHtml = `
-      <div class="transfer-body">
-        <div class="image-stage">
-          <img src="${escapeHtml(item.preview_url)}" alt="${escapeHtml(item.name)}" loading="lazy" onclick="openLightbox('${escapeHtml(item.preview_url)}')">
-        </div>
-      </div>
-    `;
     actionsHtml = `
       <div class="transfer-actions">
         ${inboxSaveAction(item)}
@@ -655,15 +658,18 @@ function renderItemCard(item) {
             ${getSvgIcon(item.kind)}
           </div>
           <div class="transfer-title-wrap">
-            <h3 class="transfer-name">${escapeHtml(item.name)}</h3>
-            <div class="transfer-meta">
-              <span class="dir-pill ${dirClass}">${dirLabel}</span>
-              <span>${escapeHtml(typeBadge)}</span>
-              <span>•</span>
-              <span>${escapeHtml(item.size_human)}</span>
-              <span>•</span>
-              <span>${escapeHtml(item.created_at)}</span>
+            <div class="transfer-title-copy">
+              <h3 class="transfer-name">${escapeHtml(item.name)}</h3>
+              <div class="transfer-meta">
+                <span class="dir-pill ${dirClass}">${dirLabel}</span>
+                <span>${escapeHtml(typeBadge)}</span>
+                <span>•</span>
+                <span>${escapeHtml(item.size_human)}</span>
+                <span>•</span>
+                <span>${escapeHtml(item.created_at)}</span>
+              </div>
             </div>
+            ${imageThumbnail}
           </div>
         </div>
         <button type="button" class="btn btn-icon" title="Remove item" onclick="deleteItem('${escapeHtml(item.id)}')" style="width:28px;height:28px;font-size:0.75rem">✕</button>

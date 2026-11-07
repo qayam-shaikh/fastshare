@@ -5,11 +5,13 @@ import tempfile
 import threading
 import unittest
 from argparse import Namespace
+from http.cookiejar import CookieJar
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import Mock, call, patch
 from urllib import request, parse
 from urllib.error import HTTPError
+from urllib.request import HTTPCookieProcessor, HTTPRedirectHandler, build_opener
 
 import quickshare
 from quickshare import QuickShareServer, ShareState
@@ -33,6 +35,7 @@ class QuickShareServerTests(unittest.TestCase):
             trusted_devices_file=self.temp_dir / "trusted_devices.json",
         )
         self.state = ShareState(self.args, "127.0.0.1", self.temp_dir)
+        self.state.mdns_host = "127.0.0.1"
         self.server = QuickShareServer(("127.0.0.1", 0), self.state)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -66,17 +69,18 @@ class QuickShareServerTests(unittest.TestCase):
         zeroconf_module.ServiceInfo = Mock()
         zeroconf_module.Zeroconf = Mock()
         zeroconf_module.Error = type("ZeroconfError", (Exception,), {})
-        with patch("quickshare.shutil.which", return_value=None), patch.dict(
-            "sys.modules", {"zeroconf": zeroconf_module}
-        ):
+        with patch("quickshare.shutil.which", return_value=None), patch(
+            "quickshare.get_system_mdns_hostname", return_value="laptop.local"
+        ), patch.dict("sys.modules", {"zeroconf": zeroconf_module}):
             publisher = quickshare.MdnsPublisher("192.168.1.10")
-            self.assertEqual(publisher.start(8765), "quickshare.local")
+            self.assertEqual(publisher.start(8765), "laptop.local")
+            self.assertEqual(publisher.active_hostname, "laptop.local")
             zeroconf_module.ServiceInfo.assert_called_once_with(
                 "_http._tcp.local.",
                 "QuickShare._http._tcp.local.",
                 addresses=[socket.inet_aton("192.168.1.10")],
                 port=8765,
-                server="quickshare.local.",
+                server="laptop.local.",
             )
             publisher.stop()
 
@@ -152,6 +156,52 @@ class QuickShareServerTests(unittest.TestCase):
         self.assertEqual(phone_response.status, 200)
         self.assertIn(b"Waiting for laptop approval", phone_response.read())
         self.assertEqual(self.state.screen, "workspace")
+
+    def test_phone_requests_redirect_to_stable_hostname(self) -> None:
+        self.state.mdns_host = "laptop.local"
+
+        class NoRedirectHandler(HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, new_url):
+                return None
+
+        req = request.Request(
+            self.base_url + "/phone?source=qr",
+            headers={"Host": f"192.168.1.25:{self.server.server_port}"},
+        )
+        with self.assertRaises(HTTPError) as response:
+            build_opener(NoRedirectHandler()).open(req, timeout=10)
+        self.assertEqual(response.exception.code, 303)
+        self.assertEqual(
+            response.exception.headers["Location"],
+            f"http://laptop.local:{self.server.server_port}/phone?source=qr",
+        )
+
+    def test_remembered_phone_cookie_survives_session_restart(self) -> None:
+        cookies = CookieJar()
+        phone = build_opener(HTTPCookieProcessor(cookies))
+        approval_response = phone.open(self.base_url + "/phone", timeout=10)
+        self.assertIn(b"Waiting for laptop approval", approval_response.read())
+        cookie = approval_response.headers["Set-Cookie"]
+        device_token = cookie.split(";", 1)[0].split("=", 1)[1]
+        self.request(f"/laptop/remember-device/{device_token}", method="POST")
+
+        restarted_state = ShareState(self.args, "127.0.0.1", self.temp_dir)
+        restarted_state.mdns_host = "127.0.0.1"
+        restarted_server = QuickShareServer(("127.0.0.1", 0), restarted_state)
+        thread = threading.Thread(target=restarted_server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            restarted_url = (
+                f"http://127.0.0.1:{restarted_server.server_address[1]}/phone"
+            )
+            with phone.open(restarted_url, timeout=10) as response:
+                page = response.read()
+            self.assertIn(b"Mobile Hub", page)
+            self.assertNotIn(b"Waiting for laptop approval", page)
+        finally:
+            restarted_server.shutdown()
+            restarted_server.server_close()
+            thread.join(timeout=5)
 
     def test_phone_approval_flow_and_scratchpad(self) -> None:
         approval_response = self.request(

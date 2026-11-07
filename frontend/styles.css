@@ -224,13 +224,20 @@ svg {
   justify-content: flex-end;
 }
 
+.topbar-controls > .connection-pill,
+.topbar-controls > .btn {
+  box-sizing: border-box;
+  height: 36px;
+  min-height: 36px;
+}
+
 .connection-pill {
   display: inline-flex;
   align-items: center;
   gap: 7px;
   font-size: 0.8rem;
   font-weight: 650;
-  padding: 6px 12px;
+  padding: 0 12px;
   border-radius: 999px;
   background: var(--amber-soft);
   color: var(--amber-600);
@@ -934,16 +941,20 @@ button,
   align-items: flex-start;
   gap: 9px;
   padding: 9px 10px;
-  border: 1px solid var(--amber-border);
+  border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
-  background: var(--amber-soft);
+  background: var(--bg-subtle);
   cursor: pointer;
+}
+
+.burn-option:has(input:checked) {
+  border-color: var(--indigo-border);
 }
 
 .burn-option input {
   flex-shrink: 0;
   margin-top: 4px;
-  accent-color: var(--amber-600);
+  accent-color: var(--indigo-600);
 }
 
 .burn-option span {
@@ -1525,6 +1536,7 @@ button,
   display: flex;
   align-items: center;
   gap: 12px;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -1544,7 +1556,17 @@ button,
 .kind-badge-icon.kind-text { background: var(--amber-soft); color: var(--amber-600); }
 
 .transfer-title-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex: 1 1 auto;
   min-width: 0;
+}
+
+.transfer-title-copy {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .transfer-name {
@@ -1623,22 +1645,29 @@ button,
   color: var(--amber-600);
 }
 
-.image-stage {
-  background: var(--bg-card);
+.image-thumb-button {
+  display: block;
+  flex: 0 0 56px;
+  width: 56px;
+  height: 56px;
+  overflow: hidden;
+  padding: 2px;
   border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  padding: 8px;
-  text-align: center;
+  border-radius: 8px;
+  background: var(--bg-card);
+  cursor: zoom-in;
 }
 
-.image-stage img {
-  max-width: 100%;
-  max-height: 240px;
-  border-radius: 6px;
-  object-fit: contain;
-  cursor: zoom-in;
+.image-thumb-button:hover {
+  border-color: var(--indigo-600);
+}
+
+.image-thumb-button img {
   display: block;
-  margin: 0 auto;
+  width: 100%;
+  height: 100%;
+  border-radius: 5px;
+  object-fit: cover;
 }
 
 .media-stage {
@@ -2759,6 +2788,47 @@ summary:focus-visible,
   }
 }
 
+@media (max-width: 720px) {
+  :root[data-role="phone"] .topbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  :root[data-role="phone"] .brand-group {
+    min-width: 0;
+    width: 100%;
+  }
+
+  :root[data-role="phone"] .brand-subtitle {
+    display: block;
+    max-width: none;
+    overflow: visible;
+    font-size: 0.72rem;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  :root[data-role="phone"] .topbar-controls {
+    width: 100%;
+    flex-wrap: nowrap;
+    gap: 6px;
+  }
+
+  :root[data-role="phone"] .connection-pill {
+    flex: 1 1 auto;
+    max-width: none;
+    padding: 0 7px;
+    white-space: nowrap;
+  }
+
+  :root[data-role="phone"] .connection-pill span:last-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
 @media (max-width: 380px) {
   .app-container {
     padding-right: 10px;
@@ -2767,6 +2837,10 @@ summary:focus-visible,
 
   .brand-subtitle {
     display: none;
+  }
+
+  :root[data-role="phone"] .brand-subtitle {
+    display: block;
   }
 
   .workspace-navigation {
