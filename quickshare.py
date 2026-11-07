@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import cgi
+import hmac
 import html
 import ipaddress
 import json
@@ -23,6 +24,7 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from http import HTTPStatus
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
@@ -35,6 +37,9 @@ IMAGE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".avif", ".ico", ".jfif", ".tif", ".tiff"
 }
 ZIP_EXTENSIONS = {".zip"}
+VIDEO_EXTENSIONS = {".mp4", ".webm"}
+AUDIO_EXTENSIONS = {".mp3", ".wav"}
+DOCUMENT_PREVIEW_EXTENSIONS = {".pdf", ".md", ".json", ".py"}
 
 
 def format_size(num_bytes: int) -> str:
@@ -204,7 +209,14 @@ class TransferItem:
             "text_too_long": self.text_too_long,
             "is_folder_zip": self.is_folder_zip,
             "download_url": f"{base_url}/download/{self.id}",
-            "preview_url": f"{base_url}/preview/{self.id}" if self.kind == "image" else "",
+            "preview_url": (
+                f"{base_url}/preview/{self.id}"
+                if self.kind == "image"
+                or Path(self.name).suffix.lower() in (
+                    DOCUMENT_PREVIEW_EXTENSIONS | VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
+                )
+                else ""
+            ),
         }
 
 
@@ -216,6 +228,10 @@ class ShareState:
         self.phone_token: str = secrets.token_urlsafe(16) if use_random else "" 
         self.bind_ip = bind_ip
         self.mdns_host = getattr(args, "mdns_host", "") or get_system_mdns_hostname()
+        self.scheme = getattr(args, "scheme", "http")
+        self.pin: str | None = getattr(args, "pin", None)
+        self.pin_cookie = secrets.token_urlsafe(32)
+        self.pin_attempts: dict[str, tuple[int, float]] = {}
         self.started = time.monotonic()
         self.minutes = args.minutes
         self.max_upload = args.max_upload_mib * MIB
@@ -230,6 +246,8 @@ class ShareState:
             self.inbox.mkdir(parents=True, exist_ok=True)
 
         self.items: list[TransferItem] = []
+        self.scratchpad = ""
+        self.scratchpad_revision = 0
         self._counter = 0
         self.screen = "home"  # "home" or "workspace"
         self.initial_focus = "send"  # "send" or "receive"
@@ -334,6 +352,65 @@ class ShareState:
                 "System clipboard is empty or unavailable. You can paste directly into the Text box instead, or install wl-clipboard / xclip / xsel."
             )
         return self.add_text_item("laptop", text, "clipboard.txt")
+
+    def update_scratchpad(self, content: str) -> int:
+        with self.lock:
+            if content != self.scratchpad:
+                self.scratchpad = content
+                self.scratchpad_revision += 1
+            return self.scratchpad_revision
+
+    def add_local_path(self, source: Path) -> list[TransferItem]:
+        if not source.exists():
+            raise ValueError(f"Path does not exist: {source}")
+        if source.is_symlink():
+            raise ValueError(f"Symbolic links are not supported: {source}")
+
+        if source.is_dir():
+            files = sorted(path for path in source.rglob("*") if path.is_file() and not path.is_symlink())
+            if not files:
+                raise ValueError(f"Folder is empty: {source}")
+            archive_path = unique_path(self.storage_dir, f"{source.name or 'folder'}.zip")
+            with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+                for path in files:
+                    archive.write(path, path.relative_to(source))
+            return [self._register_local_file(archive_path, is_folder_zip=True)]
+
+        if not source.is_file():
+            raise ValueError(f"Not a regular file: {source}")
+        target = unique_path(self.storage_dir, source.name)
+        shutil.copy2(source, target)
+        return [self._register_local_file(target)]
+
+    def _register_local_file(self, path: Path, *, is_folder_zip: bool = False) -> TransferItem:
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        item = TransferItem(
+            id=self._next_id(),
+            sender="laptop",
+            kind="zip" if is_folder_zip else classify_file_kind(path.name),
+            name=path.name,
+            path=path,
+            size=path.stat().st_size,
+            mime=mime,
+            is_folder_zip=is_folder_zip,
+        )
+        with self.lock:
+            self.items.append(item)
+            self.downloads.append(path)
+            self.selection_label = item.name
+            self.screen = "workspace"
+        return item
+
+    def save_to_inbox(self, item_id: str) -> Path:
+        with self.lock:
+            item = next((candidate for candidate in self.items if candidate.id == item_id), None)
+            if item is None or not item.path.is_file():
+                raise FileNotFoundError("Item no longer available.")
+            inbox = Path.home() / "QuickShare-Inbox"
+            inbox.mkdir(parents=True, exist_ok=True)
+            destination = unique_path(inbox, item.name)
+            shutil.copy2(item.path, destination)
+            return destination
 
     def save_uploaded_items(
         self,
@@ -511,6 +588,22 @@ class Handler(BaseHTTPRequestHandler):
         xhr = self.headers.get("X-Requested-With", "")
         return "application/json" in accept or xhr == "XMLHttpRequest"
 
+    def phone_is_unlocked(self) -> bool:
+        state = self.server.state
+        if not state.pin:
+            return True
+        try:
+            cookies = SimpleCookie(self.headers.get("Cookie", ""))
+        except CookieError:
+            return False
+        cookie = cookies.get("quickshare_pin")
+        return bool(
+            cookie
+            and hmac.compare_digest(
+                cookie.value.encode("utf-8"), state.pin_cookie.encode("utf-8")
+            )
+        )
+
     def send_text(
         self,
         text: str,
@@ -560,8 +653,8 @@ class Handler(BaseHTTPRequestHandler):
             path = path.replace("//", "/")
         path = self._normalize_alias_path(path)
 
-        if path.startswith("/static/"):
-            return self.serve_static_asset(path[len("/static/"):])
+        if path == "/service-worker.js":
+            return self.serve_service_worker()
 
         if path.startswith("/static/"):
             return self.serve_static_asset(path[len("/static/"):])
@@ -577,6 +670,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.handle_api_state(role="laptop")
             if suffix == "/download-all":
                 return self.serve_received_zip("laptop")
+            if suffix == "/storage":
+                return self.send_json(self.storage_status())
             if suffix.startswith("/download/"):
                 return self.serve_item_file(suffix.rsplit("/", 1)[1], inline=False)
             if suffix.startswith("/preview/"):
@@ -584,14 +679,22 @@ class Handler(BaseHTTPRequestHandler):
             return self.deny()
 
         if self.is_phone(path):
-            state.mark_phone_seen()
             suffix = path[len(self.phone_path()) :]
+            if suffix == "/manifest.json":
+                return self.serve_manifest()
+            if not self.phone_is_unlocked():
+                if suffix in ("", "/"):
+                    return self.send_html(self.render_pin_page())
+                return self.deny(HTTPStatus.UNAUTHORIZED, "Enter the session PIN to unlock this phone.")
+            state.mark_phone_seen()
             if suffix in ("", "/"):
                 return self.send_html(self.render_app_page(role="phone"))
             if suffix == "/api/state":
                 return self.handle_api_state(role="phone")
             if suffix == "/download-all":
                 return self.serve_received_zip("phone")
+            if suffix == "/storage":
+                return self.send_json(self.storage_status())
             if suffix.startswith("/download/"):
                 return self.serve_item_file(suffix.rsplit("/", 1)[1], inline=False)
             if suffix.startswith("/preview/"):
@@ -613,10 +716,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.handle_admin_post(path[len(self.admin_path()) :])
 
         if self.is_phone(path):
-            state.mark_phone_seen()
             suffix = path[len(self.phone_path()) :]
+            if suffix == "/unlock" and state.pin:
+                return self.handle_pin_unlock()
+            if not self.phone_is_unlocked():
+                return self.deny(HTTPStatus.UNAUTHORIZED, "Enter the session PIN to unlock this phone.")
+            state.mark_phone_seen()
             if suffix in ("/upload", "/files", "/images", "/folder", "/text"):
                 return self.handle_upload_post(sender="phone", suffix=suffix)
+            if suffix == "/scratchpad":
+                return self.handle_scratchpad_post()
+            if suffix == "/share-target":
+                return self.handle_share_target()
             if suffix.startswith("/delete/"):
                 item_id = suffix.rsplit("/", 1)[1]
                 state.delete_item(item_id)
@@ -624,7 +735,7 @@ class Handler(BaseHTTPRequestHandler):
 
         return self.deny()
 
-    def parse_form(self) -> cgi.FieldStorage | None:
+    def parse_form(self, *, is_folder: bool = False) -> cgi.FieldStorage | None:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -634,6 +745,15 @@ class Handler(BaseHTTPRequestHandler):
             self.deny(
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                 f"Upload exceeds the {self.server.state.max_upload // MIB} MiB limit.",
+            )
+            return None
+        free_bytes = shutil.disk_usage(self.server.state.work).free
+        storage_multiplier = 3 if is_folder else 2
+        required_bytes = length * storage_multiplier
+        if required_bytes > free_bytes:
+            self.deny(
+                HTTPStatus.INSUFFICIENT_STORAGE,
+                f"Upload may need up to {format_size(required_bytes)} of temporary storage, but only {format_size(free_bytes)} is available.",
             )
             return None
         ctype = self.headers.get_content_type()
@@ -659,6 +779,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_api_state(self, role: str) -> None:
         state = self.server.state
         base = self.admin_path() if role == "laptop" else self.phone_path()
+        disk = self.storage_status()
         with state.lock:
             items_data = [item.to_dict(base) for item in reversed(state.items)]
             payload = {
@@ -670,10 +791,21 @@ class Handler(BaseHTTPRequestHandler):
                 "phone_url": self.phone_url(),
                 "phone_ip_url": self.phone_ip_url(),
                 "laptop_url": self.laptop_url(),
+                "scratchpad": state.scratchpad,
+                "scratchpad_revision": state.scratchpad_revision,
+                **disk,
                 "remaining_seconds": state.remaining_seconds(),
                 "items": items_data,
             }
         self.send_json(payload)
+
+    def storage_status(self) -> dict:
+        usage = shutil.disk_usage(self.server.state.work)
+        return {
+            "free_disk_bytes": usage.free,
+            "free_disk_human": format_size(usage.free),
+            "total_disk_bytes": usage.total,
+        }
 
     def handle_admin_post(self, suffix: str) -> None:
         state = self.server.state
@@ -715,6 +847,20 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return self.redirect(self.admin_path())
 
+        if suffix.startswith("/save-to-inbox/"):
+            item_id = suffix.rsplit("/", 1)[1]
+            try:
+                saved_path = state.save_to_inbox(item_id)
+            except (FileNotFoundError, OSError) as error:
+                return self.send_json(
+                    {"ok": False, "error": str(error)},
+                    status=HTTPStatus.NOT_FOUND if isinstance(error, FileNotFoundError) else HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
+            return self.send_json({"ok": True, "path": str(saved_path)})
+
+        if suffix == "/scratchpad":
+            return self.handle_scratchpad_post()
+
         if suffix in ("/upload", "/images", "/files", "/folder", "/text"):
             return self.handle_upload_post(sender="laptop", suffix=suffix)
 
@@ -741,8 +887,99 @@ class Handler(BaseHTTPRequestHandler):
 
         return self.deny()
 
-    def handle_upload_post(self, sender: str, suffix: str) -> None:
+    def handle_pin_unlock(self) -> None:
+        state = self.server.state
+        client = self.client_address[0]
+        attempts, blocked_until = state.pin_attempts.get(client, (0, 0.0))
+        now = time.monotonic()
+        if blocked_until > now:
+            return self.deny(HTTPStatus.TOO_MANY_REQUESTS, "Too many incorrect PIN attempts. Try again shortly.")
+        if blocked_until:
+            attempts = 0
+
         form = self.parse_form()
+        if form is None:
+            return
+        candidate = form.getfirst("pin", "")
+        if not hmac.compare_digest(
+            candidate.encode("utf-8"), (state.pin or "").encode("utf-8")
+        ):
+            attempts += 1
+            blocked_until = now + 60 if attempts >= 5 else 0.0
+            state.pin_attempts[client] = (attempts, blocked_until)
+            if not self.wants_json():
+                return self.send_html(self.render_pin_page("Incorrect PIN."), HTTPStatus.FORBIDDEN)
+            return self.deny(HTTPStatus.FORBIDDEN, "Incorrect PIN.")
+
+        state.pin_attempts.pop(client, None)
+        self.send_response(HTTPStatus.OK if self.wants_json() else HTTPStatus.SEE_OTHER)
+        self.send_header(
+            "Set-Cookie",
+            f"quickshare_pin={state.pin_cookie}; HttpOnly; SameSite=Strict; Path={self.phone_path()}; Max-Age=86400",
+        )
+        self.send_header("Cache-Control", "no-store")
+        if self.wants_json():
+            body = json.dumps({"ok": True}).encode("utf-8")
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_header("Location", self.phone_path())
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    def render_pin_page(self, error: str = "") -> str:
+        phone_path = html.escape(self.phone_path(), quote=True)
+        error_html = f'<p class="pin-error" role="alert">{html.escape(error)}</p>' if error else ""
+        return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0b0f19"><link rel="manifest" href="{phone_path}/manifest.json"><title>QuickShare PIN</title>
+<style>body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0f19;color:#f8fafc;font:16px system-ui,sans-serif}}main{{width:min(360px,calc(100% - 40px));padding:24px;background:#111827;border:1px solid #334155;border-radius:16px}}label{{display:block;margin:16px 0 6px}}input,button{{width:100%;box-sizing:border-box;padding:12px;border-radius:8px;font:inherit}}input{{border:1px solid #475569;background:#0f172a;color:#fff;letter-spacing:.3em}}button{{margin-top:12px;border:0;background:#6366f1;color:white;font-weight:700}}.pin-error{{color:#f87171}}</style></head>
+<body><main><h1>QuickShare is locked</h1><p>Enter the 4-digit session PIN to continue.</p>{error_html}
+<form method="post" action="{phone_path}/unlock"><label for="pin">Session PIN</label><input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]{{4}}" maxlength="4" autocomplete="one-time-code" required autofocus><button type="submit">Unlock</button></form></main>
+<script>if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/service-worker.js").catch(error => console.error("QuickShare service worker registration failed:", error));</script>
+</body></html>"""
+
+    def handle_scratchpad_post(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return self.deny(HTTPStatus.BAD_REQUEST, "Invalid request length.")
+        if length <= 0 or length > MIB:
+            return self.deny(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "Scratchpad update is too large.")
+        if self.headers.get_content_type() != "application/json":
+            return self.deny(HTTPStatus.BAD_REQUEST, "Expected a JSON scratchpad update.")
+        try:
+            payload = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return self.deny(HTTPStatus.BAD_REQUEST, "Could not read scratchpad update.")
+        if not isinstance(payload, dict) or not isinstance(payload.get("content"), str):
+            return self.deny(HTTPStatus.BAD_REQUEST, "Scratchpad content must be text.")
+        revision = self.server.state.update_scratchpad(payload["content"])
+        self.send_json({"ok": True, "revision": revision})
+
+    def handle_share_target(self) -> None:
+        form = self.parse_form()
+        if form is None:
+            return
+        state = self.server.state
+        added: list[TransferItem] = []
+        text_parts = [
+            value.strip()
+            for value in (form.getfirst("title", ""), form.getfirst("text", ""), form.getfirst("url", ""))
+            if value and value.strip()
+        ]
+        if text_parts:
+            added.append(state.add_text_item("phone", "\n".join(text_parts), "android-share.txt"))
+        if "files" in form:
+            added.extend(state.save_uploaded_items("phone", form, "files"))
+        if not added:
+            return self.send_html("No files or text were shared.", HTTPStatus.BAD_REQUEST)
+        return self.redirect(self.phone_path())
+
+    def handle_upload_post(self, sender: str, suffix: str) -> None:
+        form = self.parse_form(is_folder=suffix == "/folder")
         if form is None:
             return
         state = self.server.state
@@ -807,9 +1044,40 @@ class Handler(BaseHTTPRequestHandler):
         item = self.server.state.get_item(item_id)
         if item is None or not item.path.exists():
             return self.deny(HTTPStatus.NOT_FOUND, "Item no longer available.")
+        extension = Path(item.name).suffix.lower()
+        if inline and item.kind != "image" and extension not in (
+            DOCUMENT_PREVIEW_EXTENSIONS | VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
+        ):
+            return self.deny(HTTPStatus.NOT_FOUND, "Preview not available for this file.")
         try:
             size = item.path.stat().st_size
-            self.send_response(HTTPStatus.OK)
+            start = 0
+            end = size - 1
+            status = HTTPStatus.OK
+            byte_range = self.headers.get("Range")
+            if inline and byte_range:
+                try:
+                    unit, value = byte_range.split("=", 1)
+                    if unit != "bytes" or "," in value:
+                        raise ValueError
+                    first, last = value.split("-", 1)
+                    if first:
+                        start = int(first)
+                        end = min(int(last), size - 1) if last else size - 1
+                    else:
+                        length = int(last)
+                        start = max(0, size - length)
+                    if start >= size or end < start:
+                        raise ValueError
+                    status = HTTPStatus.PARTIAL_CONTENT
+                except ValueError:
+                    self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+
+            self.send_response(status)
             self.send_header("Content-Type", item.mime)
             disposition = "inline" if inline else "attachment"
             encoded_name = urllib.parse.quote(item.name)
@@ -817,11 +1085,23 @@ class Handler(BaseHTTPRequestHandler):
                 "Content-Disposition",
                 f"{disposition}; filename*=UTF-8''{encoded_name}",
             )
-            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Length", str(end - start + 1))
+            if inline:
+                self.send_header("Accept-Ranges", "bytes")
+                if status == HTTPStatus.PARTIAL_CONTENT:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             with item.path.open("rb") as source:
-                shutil.copyfileobj(source, self.wfile)
+                source.seek(start)
+                remaining = end - start + 1
+                while remaining > 0:
+                    chunk = source.read(min(MIB, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
         except (OSError, BrokenPipeError):
             pass
 
@@ -928,13 +1208,14 @@ class Handler(BaseHTTPRequestHandler):
                 return ""
 
     def phone_url(self) -> str:
-        return f"http://{self.server.state.mdns_host}:{self.server.server_port}{self.phone_path()}"
+        return f"{self.server.state.scheme}://{self.server.state.mdns_host}:{self.server.server_port}{self.phone_path()}"
 
     def phone_ip_url(self) -> str:
-        return f"http://{self.server.state.bind_ip}:{self.server.server_port}{self.phone_path()}"
+        return f"{self.server.state.scheme}://{self.server.state.bind_ip}:{self.server.server_port}{self.phone_path()}"
 
     def laptop_url(self) -> str:
-        return f"http://localhost:{self.server.server_port}{self.admin_path()}"
+        host = self.server.state.mdns_host if self.server.state.scheme == "https" else "localhost"
+        return f"{self.server.state.scheme}://{host}:{self.server.server_port}{self.admin_path()}"
 
     def serve_static_asset(self, filename: str) -> None:
         frontend_dir = Path(__file__).with_name("frontend")
@@ -948,21 +1229,85 @@ class Handler(BaseHTTPRequestHandler):
             ctype = "application/javascript; charset=utf-8"
         elif filename.endswith(".html"):
             ctype = "text/html; charset=utf-8"
+        elif filename.endswith(".json"):
+            ctype = "application/json; charset=utf-8"
+        elif filename.endswith(".svg"):
+            ctype = "image/svg+xml"
+        elif filename.endswith(".png"):
+            body = target.read_bytes()
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(body)
+            return
         self.send_text(target.read_text(encoding="utf-8"), HTTPStatus.OK, ctype)
 
-    def serve_static_asset(self, filename: str) -> None:
-        frontend_dir = Path(__file__).with_name("frontend")
-        target = (frontend_dir / filename).resolve()
-        if not target.is_file() or target.parent != frontend_dir.resolve():
-            return self.deny(HTTPStatus.NOT_FOUND, "Static file not found.")
-        ctype = "text/plain; charset=utf-8"
-        if filename.endswith(".css"):
-            ctype = "text/css; charset=utf-8"
-        elif filename.endswith(".js"):
-            ctype = "application/javascript; charset=utf-8"
-        elif filename.endswith(".html"):
-            ctype = "text/html; charset=utf-8"
-        self.send_text(target.read_text(encoding="utf-8"), HTTPStatus.OK, ctype)
+    def serve_service_worker(self) -> None:
+        target = Path(__file__).with_name("frontend") / "service-worker.js"
+        if not target.is_file():
+            return self.deny(HTTPStatus.NOT_FOUND, "Service worker not found.")
+        body = target.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/javascript; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Service-Worker-Allowed", "/")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def serve_manifest(self) -> None:
+        phone_path = self.phone_path()
+        manifest = {
+            "id": phone_path,
+            "name": "QuickShare",
+            "short_name": "QuickShare",
+            "description": "Private, local file sharing between your laptop and phone.",
+            "start_url": phone_path,
+            "scope": "/",
+            "display": "standalone",
+            "background_color": "#0b0f19",
+            "theme_color": "#0b0f19",
+            "icons": [
+                {
+                    "src": "/static/icon-192.png",
+                    "sizes": "192x192",
+                    "type": "image/png",
+                    "purpose": "any",
+                },
+                {
+                    "src": "/static/icon-512.png",
+                    "sizes": "512x512",
+                    "type": "image/png",
+                    "purpose": "any",
+                },
+            ],
+            "share_target": {
+                "action": f"{phone_path}/share-target",
+                "method": "POST",
+                "enctype": "multipart/form-data",
+                "params": {
+                    "title": "title",
+                    "text": "text",
+                    "url": "url",
+                    "files": [
+                        {
+                            "name": "files",
+                            "accept": ["image/*", "video/*", "audio/*", "application/pdf"],
+                        }
+                    ],
+                },
+            },
+        }
+        body = json.dumps(manifest).encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/manifest+json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def render_app_page(self, role: str = "laptop", error: str = "") -> str:
         state = self.server.state
@@ -980,6 +1325,10 @@ class Handler(BaseHTTPRequestHandler):
             "laptopUrl": self.laptop_url(),
             "qrDataUri": qr_uri,
             "maxUploadMib": state.max_upload // MIB,
+            "freeDiskBytes": shutil.disk_usage(state.work).free,
+            "scratchpad": state.scratchpad,
+            "scratchpadRevision": state.scratchpad_revision,
+            "pinEnabled": bool(state.pin),
             "remainingSeconds": state.remaining_seconds(),
             "error": error,
             "items": [
@@ -988,10 +1337,13 @@ class Handler(BaseHTTPRequestHandler):
         }
         state_json = json.dumps(initial_state, ensure_ascii=False).replace("</", "<\\/")
         title = "QuickShare • Laptop Hub" if role == "laptop" else "QuickShare • Mobile Hub"
+        manifest_url = f"{base_path}/manifest.json" if role == "phone" else "/static/manifest.json"
         template_path = Path(__file__).with_name("frontend") / "index.html"
         template_html = template_path.read_text(encoding="utf-8")
-        return template_html.replace("__PAGE_TITLE__", html.escape(title)).replace(
-            "__INITIAL_STATE_JSON__", state_json
+        return (
+            template_html.replace("__PAGE_TITLE__", html.escape(title))
+            .replace("__INITIAL_STATE_JSON__", state_json)
+            .replace("__MANIFEST_URL__", html.escape(manifest_url, quote=True))
         )
 
 def main() -> int:
@@ -1030,11 +1382,32 @@ def main() -> int:
         help="Also save copies of incoming phone uploads to --inbox directory",
     )
     parser.add_argument(
+        "--pin",
+        help="Require a 4-digit PIN before phones can access this session",
+    )
+    parser.add_argument("--tls-cert", help="TLS certificate PEM file (enables HTTPS)")
+    parser.add_argument("--tls-key", help="TLS private key PEM file (enables HTTPS)")
+    parser.add_argument(
         "--no-browser",
         action="store_true",
         help="Do not automatically open the laptop browser",
     )
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        help="Optional files or folders to pre-share (also accepts: send PATH...)",
+    )
     args = parser.parse_args()
+    if args.paths and args.paths[0] == "send":
+        args.paths = args.paths[1:]
+        if not args.paths:
+            parser.error("send requires at least one file or folder")
+    if args.pin is not None and (
+        len(args.pin) != 4 or any(char < "0" or char > "9" for char in args.pin)
+    ):
+        parser.error("--pin must contain exactly four digits")
+    if bool(args.tls_cert) != bool(args.tls_key):
+        parser.error("--tls-cert and --tls-key must be provided together")
     if args.minutes < 0 or args.max_upload_mib < 1 or not 0 <= args.port <= 65535:
         parser.error("Invalid limit or port")
     addresses = private_ipv4_addresses()
@@ -1053,26 +1426,46 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="quickshare-") as work:
         mdns = MdnsPublisher(bind_ip, alias="quickshare.local")
         args.mdns_host = mdns.start()
+        args.scheme = "https" if args.tls_cert else "http"
         state = ShareState(args, bind_ip, Path(work))
+        try:
+            for path_arg in args.paths:
+                state.add_local_path(Path(path_arg).expanduser().resolve())
+        except (OSError, ValueError) as error:
+            mdns.stop()
+            parser.error(str(error))
         listen_host = args.bind if args.bind else "0.0.0.0"
         try:
             server = QuickShareServer((listen_host, args.port), state)
         except OSError:
             server = QuickShareServer((listen_host, 0), state)
+        if args.tls_cert:
+            import ssl
+
+            tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            try:
+                tls_context.load_cert_chain(args.tls_cert, args.tls_key)
+            except (OSError, ssl.SSLError) as error:
+                mdns.stop()
+                server.server_close()
+                parser.error(f"Could not load TLS certificate/key: {error}")
+            server.socket = tls_context.wrap_socket(server.socket, server_side=True)
         admin_route = f"/laptop/{state.admin_token}" if state.admin_token else "/laptop"
         phone_route = f"/phone/{state.phone_token}" if state.phone_token else "/phone"
-        laptop_url = f"http://localhost:{server.server_port}{admin_route}"
-        laptop_mdns_url = f"http://{state.mdns_host}:{server.server_port}{admin_route}"
-        phone_url = f"http://{state.mdns_host}:{server.server_port}{phone_route}"
-        phone_ip_url = f"http://{bind_ip}:{server.server_port}{phone_route}"
-        print(
+        laptop_url = f"{state.scheme}://{state.mdns_host if state.scheme == 'https' else 'localhost'}:{server.server_port}{admin_route}"
+        laptop_mdns_url = f"{state.scheme}://{state.mdns_host}:{server.server_port}{admin_route}"
+        phone_url = f"{state.scheme}://{state.mdns_host}:{server.server_port}{phone_route}"
+        phone_ip_url = f"{state.scheme}://{bind_ip}:{server.server_port}{phone_route}"
+        startup_message = (
             "QuickShare is running (two-way session, no background service)."
             f"\n  Laptop URL (Wi-Fi independent): {laptop_url}  (or {laptop_mdns_url})"
             f"\n  Phone URL  (Wi-Fi independent): {phone_url}"
             f"\n  Phone Fallback IP URL:          {phone_ip_url}"
-            "\nPress Ctrl+C to stop.",
-            flush=True,
+            f"\n  Inbox directory:                 {Path.home() / 'QuickShare-Inbox'}"
         )
+        if args.pin:
+            startup_message += "\n  Phone access:                    PIN required"
+        print(startup_message + "\nPress Ctrl+C to stop.", flush=True)
         timer = (
             threading.Timer(args.minutes * 60, server.shutdown)
             if args.minutes

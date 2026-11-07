@@ -10,6 +10,7 @@ const STATE = window.__INITIAL_STATE__ || {
   laptopUrl: "http://localhost:8765/laptop",
   qrDataUri: "",
   maxUploadMib: 500,
+  freeDiskBytes: 0,
   remainingSeconds: 3600,
   error: "",
   items: []
@@ -19,6 +20,22 @@ let currentFilter = "all";
 let qrManuallyToggled = false;
 let qrVisible = true;
 let lastRenderedSignature = "";
+let filePreviewRequest = 0;
+let scratchpadRevision = Number(STATE.scratchpadRevision) || 0;
+let scratchpadSaveTimer = null;
+let scratchpadSavePending = false;
+let scratchpadLastSynced = String(STATE.scratchpad || "");
+let installPromptEvent = null;
+
+function isMediaPreviewable(item) {
+  const extension = item.name.split(".").pop().toLowerCase();
+  return ["mp4", "webm", "mp3", "wav"].includes(extension) && Boolean(item.preview_url);
+}
+
+function isDocumentPreviewable(item) {
+  const extension = item.name.split(".").pop().toLowerCase();
+  return ["pdf", "md", "json", "py"].includes(extension) && Boolean(item.preview_url);
+}
 
 function initTheme() {
   try {
@@ -163,6 +180,188 @@ function closeLightbox() {
   if (lb) lb.classList.remove("open");
 }
 
+async function openFilePreview(itemId) {
+  const item = (STATE.items || []).find(candidate => candidate.id === itemId);
+  if (!item || !isDocumentPreviewable(item)) return;
+
+  const requestId = ++filePreviewRequest;
+  const extension = item.name.split(".").pop().toLowerCase();
+  const modal = document.getElementById("filePreviewModal");
+  const title = document.getElementById("filePreviewTitle");
+  const status = document.getElementById("filePreviewStatus");
+  const pdf = document.getElementById("filePreviewPdf");
+  const code = document.getElementById("filePreviewCode");
+  title.textContent = item.name;
+  status.hidden = false;
+  status.textContent = "Loading preview…";
+  pdf.hidden = true;
+  code.hidden = true;
+  pdf.removeAttribute("src");
+  code.textContent = "";
+  modal.classList.add("open");
+
+  if (extension === "pdf") {
+    pdf.src = item.preview_url;
+    pdf.hidden = false;
+    status.hidden = true;
+    return;
+  }
+
+  try {
+    const response = await fetch(item.preview_url, { cache: "no-store" });
+    if (!response.ok) throw new Error(`Preview request failed (${response.status}).`);
+    const contents = await response.text();
+    if (requestId !== filePreviewRequest) return;
+    code.textContent = contents;
+    code.hidden = false;
+    status.hidden = true;
+  } catch (error) {
+    if (requestId !== filePreviewRequest) return;
+    status.textContent = error.message || "Could not load file preview.";
+  }
+}
+
+function closeFilePreview() {
+  filePreviewRequest++;
+  const modal = document.getElementById("filePreviewModal");
+  const pdf = document.getElementById("filePreviewPdf");
+  if (modal) modal.classList.remove("open");
+  if (pdf) pdf.removeAttribute("src");
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "Unknown";
+  if (bytes < 1024 ** 3) return `${(bytes / (1024 ** 2)).toFixed(1)} MB`;
+  return `${(bytes / (1024 ** 3)).toFixed(1)} GB`;
+}
+
+function saveToLaptopInbox(itemId, button) {
+  button.disabled = true;
+  button.textContent = "Saving…";
+  fetch(`${STATE.basePath}/save-to-inbox/${encodeURIComponent(itemId)}`, {
+    method: "POST",
+    headers: { "Accept": "application/json", "X-Requested-With": "XMLHttpRequest" }
+  }).then(async response => {
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Could not save to laptop inbox.");
+    button.textContent = "Saved to Inbox";
+    showToast(`Saved to ${data.path}`);
+  }).catch(error => {
+    button.disabled = false;
+    button.textContent = "Save to Inbox";
+    showError(error.message || "Could not save to laptop inbox.");
+  });
+}
+
+function inboxSaveAction(item) {
+  if (STATE.role !== "laptop" || item.sender === STATE.role) return "";
+  return `<button type="button" class="btn btn-outline btn-sm" onclick="saveToLaptopInbox('${escapeHtml(item.id)}', this)">Save to Inbox</button>`;
+}
+
+function setSessionView(view) {
+  const scratchpadVisible = view === "scratchpad";
+  document.getElementById("feedViewPanel").hidden = scratchpadVisible;
+  document.getElementById("scratchpadViewPanel").hidden = !scratchpadVisible;
+  document.getElementById("feedViewTab").classList.toggle("active", !scratchpadVisible);
+  document.getElementById("scratchpadViewTab").classList.toggle("active", scratchpadVisible);
+  document.getElementById("feedViewTab").setAttribute("aria-selected", String(!scratchpadVisible));
+  document.getElementById("scratchpadViewTab").setAttribute("aria-selected", String(scratchpadVisible));
+}
+
+function queueScratchpadSave() {
+  const input = document.getElementById("scratchpadInput");
+  if (!input || input.value === scratchpadLastSynced) return;
+  clearTimeout(scratchpadSaveTimer);
+  document.getElementById("scratchpadStatus").textContent = "Syncing…";
+  scratchpadSaveTimer = setTimeout(saveScratchpad, 250);
+}
+
+async function saveScratchpad() {
+  const input = document.getElementById("scratchpadInput");
+  const status = document.getElementById("scratchpadStatus");
+  if (!input) return;
+  const content = input.value;
+  scratchpadSavePending = true;
+  let saved = false;
+  try {
+    const response = await fetch(`${STATE.basePath}/scratchpad`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json", "X-Requested-With": "XMLHttpRequest" },
+      body: JSON.stringify({ content })
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || "Scratchpad sync failed.");
+    scratchpadRevision = Math.max(scratchpadRevision, Number(data.revision) || 0);
+    scratchpadLastSynced = content;
+    saved = true;
+    status.textContent = "Synced";
+  } catch (error) {
+    status.textContent = "Sync failed — retry by typing";
+    showError(error.message || "Scratchpad sync failed.");
+  } finally {
+    scratchpadSavePending = false;
+    if (saved && input.value !== scratchpadLastSynced) queueScratchpadSave();
+  }
+}
+
+function updateScratchpadFromServer(data) {
+  const input = document.getElementById("scratchpadInput");
+  if (!input) return;
+  const revision = Number(data.scratchpad_revision) || 0;
+  if (revision <= scratchpadRevision) {
+    if (!scratchpadRevision && !input.value && data.scratchpad) {
+      input.value = String(data.scratchpad);
+      scratchpadLastSynced = input.value;
+    }
+    return;
+  }
+  scratchpadRevision = revision;
+  if (scratchpadSavePending || scratchpadSaveTimer) return;
+  input.value = String(data.scratchpad || "");
+  scratchpadLastSynced = input.value;
+  document.getElementById("scratchpadStatus").textContent = "Synced";
+}
+
+async function installQuickShare() {
+  if (window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true) {
+    showToast("QuickShare is already installed.");
+    return;
+  }
+
+  if (installPromptEvent) {
+    const promptEvent = installPromptEvent;
+    installPromptEvent = null;
+    try {
+      await promptEvent.prompt();
+      const choice = await promptEvent.userChoice;
+      if (choice.outcome === "accepted") {
+        document.getElementById("installAppPanel").hidden = true;
+      } else {
+        showToast("Install dismissed. You can try again from your browser menu.");
+      }
+      return;
+    } catch (error) {
+      showError(error.message || "Could not open the install prompt. Try your browser menu.");
+      return;
+    }
+  }
+
+  const isLocalhost = ["localhost", "127.0.0.1", "::1"].includes(location.hostname);
+  if (!window.isSecureContext || (location.protocol !== "https:" && !isLocalhost)) {
+    showError("Mobile app installation requires HTTPS with a certificate trusted by this phone. Open QuickShare using its trusted HTTPS URL, then tap Install App again.");
+    return;
+  }
+
+  const isAppleMobile = /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  if (isAppleMobile) {
+    showError("To install on iPhone or iPad, tap Share in Safari, then choose Add to Home Screen.");
+    return;
+  }
+
+  showError("If no install prompt opened, use your browser menu (⋮) and choose Install app or Add to Home screen. If that option is missing, open this page in Chrome over trusted HTTPS.");
+}
+
 function openStopModal() {
   const m = document.getElementById("stopModal");
   if (m) m.classList.add("open");
@@ -256,6 +455,7 @@ function renderItemCard(item) {
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
               <span>Download .txt</span>
             </a>
+            ${inboxSaveAction(item)}
           </div>
         </div>
       `;
@@ -274,6 +474,7 @@ function renderItemCard(item) {
             <a class="btn btn-primary btn-xs" href="${escapeHtml(item.download_url)}" download="${escapeHtml(item.name)}">
               <span>Download .txt</span>
             </a>
+            ${inboxSaveAction(item)}
           </div>
         </div>
       `;
@@ -286,6 +487,7 @@ function renderItemCard(item) {
           <a class="btn btn-outline btn-sm" href="${escapeHtml(item.download_url)}" download="${escapeHtml(item.name)}">
             <span>Save .txt</span>
           </a>
+          ${inboxSaveAction(item)}
         </div>
       `;
     }
@@ -299,15 +501,34 @@ function renderItemCard(item) {
     `;
     actionsHtml = `
       <div class="transfer-actions">
+        ${inboxSaveAction(item)}
         <a class="btn btn-primary btn-sm" href="${escapeHtml(item.download_url)}" download="${escapeHtml(item.name)}">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           <span>Download Image</span>
         </a>
       </div>
     `;
+  } else if (isMediaPreviewable(item)) {
+    const isVideo = ["mp4", "webm"].includes(item.name.split(".").pop().toLowerCase());
+    bodyHtml = `
+      <div class="transfer-body">
+        <div class="media-stage">
+          ${isVideo
+            ? `<video controls playsinline preload="metadata" src="${escapeHtml(item.preview_url)}">Your browser does not support video playback.</video>`
+            : `<audio controls preload="metadata" src="${escapeHtml(item.preview_url)}">Your browser does not support audio playback.</audio>`}
+        </div>
+      </div>
+    `;
+    actionsHtml = `
+      <div class="transfer-actions">
+        ${inboxSaveAction(item)}
+        <a class="btn btn-primary btn-sm" href="${escapeHtml(item.download_url)}" download="${escapeHtml(item.name)}"><span>Download ${isVideo ? "Video" : "Audio"}</span></a>
+      </div>
+    `;
   } else if (item.kind === "zip") {
     actionsHtml = `
       <div class="transfer-actions">
+        ${inboxSaveAction(item)}
         <a class="btn btn-primary btn-sm" href="${escapeHtml(item.download_url)}" download="${escapeHtml(item.name)}">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           <span>Download ZIP</span>
@@ -315,8 +536,13 @@ function renderItemCard(item) {
       </div>
     `;
   } else {
+    const previewAction = isDocumentPreviewable(item)
+      ? `<button type="button" class="btn btn-outline btn-sm" onclick="openFilePreview('${escapeHtml(item.id)}')">Preview</button>`
+      : "";
     actionsHtml = `
       <div class="transfer-actions">
+        ${previewAction}
+        ${inboxSaveAction(item)}
         <a class="btn btn-primary btn-sm" href="${escapeHtml(item.download_url)}" download="${escapeHtml(item.name)}">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
           <span>Download File</span>
@@ -325,8 +551,9 @@ function renderItemCard(item) {
     `;
   }
 
+  const previewable = item.kind !== "image" && isDocumentPreviewable(item);
   return `
-    <article class="transfer-card ${dirClass}" data-id="${escapeHtml(item.id)}">
+    <article class="transfer-card ${dirClass}${previewable ? " previewable" : ""}" data-id="${escapeHtml(item.id)}"${previewable ? ` onclick="if (!event.target.closest('button, a')) openFilePreview('${escapeHtml(item.id)}')"` : ""}>
       <div class="transfer-top">
         <div class="transfer-info">
           <div class="kind-badge-icon kind-${escapeHtml(item.kind)}" title="${escapeHtml(typeBadge)}">
@@ -575,6 +802,17 @@ async function sendTextMessage() {
 async function uploadSelectedFiles(fileList, isFolder) {
   showError("");
   if (!fileList || fileList.length === 0) return;
+  const fileBytes = Array.from(fileList).reduce((total, file) => total + file.size, 0);
+  const requestBytes = fileBytes + fileList.length * 1024 + 4096;
+  if (requestBytes > STATE.maxUploadMib * 1024 ** 2) {
+    showError(`Selected files exceed the ${STATE.maxUploadMib} MiB upload limit.`);
+    return;
+  }
+  const requiredDiskBytes = requestBytes * (isFolder ? 3 : 2);
+  if (Number.isFinite(STATE.freeDiskBytes) && requiredDiskBytes > STATE.freeDiskBytes) {
+    showError(`Upload may need up to ${formatBytes(requiredDiskBytes)} temporary storage; ${formatBytes(STATE.freeDiskBytes)} is available.`);
+    return;
+  }
   const fd = new FormData();
   if (isFolder) {
     fd.append("is_folder", "1");
@@ -590,7 +828,7 @@ async function uploadSelectedFiles(fileList, isFolder) {
   const label = isFolder
     ? `Packing & sending folder (${fileList.length} files)…`
     : `Sending ${fileList.length} file${fileList.length > 1 ? "s" : ""}…`;
-  await performFormDataUpload(fd, label);
+  await performFormDataUpload(fd, label, isFolder ? "/folder" : "/upload");
 }
 
 function getPastedImageFiles(clipboardData) {
@@ -626,28 +864,38 @@ function getPastedImageFiles(clipboardData) {
   return files;
 }
 
-function performFormDataUpload(formData, labelText) {
+function performFormDataUpload(formData, labelText, endpoint = "/upload") {
   return new Promise((resolve) => {
     const wrap = document.getElementById("uploadProgressWrap");
     const bar = document.getElementById("uploadProgressBar");
-    const pctEl = document.getElementById("uploadProgressPct");
+    const detailsEl = document.getElementById("uploadProgressDetails");
     const lblEl = document.getElementById("uploadProgressLabel");
 
     lblEl.textContent = labelText;
-    pctEl.textContent = "0%";
+    detailsEl.textContent = "0%";
+    document.getElementById("storageInfo").textContent =
+      `Laptop storage available: ${formatBytes(STATE.freeDiskBytes)}`;
     bar.style.width = "0%";
     wrap.classList.add("active");
 
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", STATE.basePath + "/upload", true);
+    let lastProgressAt = performance.now();
+    let lastLoaded = 0;
+    xhr.open("POST", STATE.basePath + endpoint, true);
     xhr.setRequestHeader("Accept", "application/json");
     xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
 
     xhr.upload.onprogress = (ev) => {
       if (ev.lengthComputable) {
         const pct = Math.min(100, Math.round((ev.loaded / ev.total) * 100));
+        const now = performance.now();
+        const seconds = (now - lastProgressAt) / 1000;
+        const speed = seconds > 0 ? (ev.loaded - lastLoaded) / seconds : 0;
+        const remaining = speed > 0 ? Math.ceil((ev.total - ev.loaded) / speed) : null;
         bar.style.width = pct + "%";
-        pctEl.textContent = pct + "%";
+        detailsEl.textContent = `${pct}% · ${(speed / (1024 ** 2)).toFixed(2)} MB/s${remaining === null ? "" : ` · ~${remaining}s`}`;
+        lastProgressAt = now;
+        lastLoaded = ev.loaded;
       }
     };
 
@@ -716,12 +964,38 @@ async function pollState() {
     STATE.phoneConnected = data.phone_connected;
     STATE.screen = STATE.role === "laptop" ? data.screen : "workspace";
     STATE.items = data.items || [];
+    STATE.freeDiskBytes = Number(data.free_disk_bytes) || 0;
+    document.getElementById("storageInfo").textContent =
+      `Laptop storage available: ${formatBytes(STATE.freeDiskBytes)}`;
+    updateScratchpadFromServer(data);
     if (!wasConnected && STATE.phoneConnected && STATE.role === "laptop") {
       showToast("Phone connected! Two-way sharing is active.");
     }
     updateUI();
   } catch (_) {}
 }
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  installPromptEvent = event;
+});
+
+window.addEventListener("appinstalled", () => {
+  installPromptEvent = null;
+  document.getElementById("installAppPanel").hidden = true;
+  showToast("QuickShare installed.");
+});
+
+const installAppBtn = document.getElementById("installAppBtn");
+const installAppPanel = document.getElementById("installAppPanel");
+installAppPanel.hidden = STATE.role !== "phone"
+  || window.matchMedia("(display-mode: standalone)").matches
+  || window.navigator.standalone === true;
+
+document.getElementById("scratchpadInput").addEventListener("input", queueScratchpadSave);
+document.getElementById("scratchpadInput").value = String(STATE.scratchpad || "");
+document.getElementById("storageInfo").textContent =
+  `Laptop storage available: ${formatBytes(STATE.freeDiskBytes)}`;
 
 document.addEventListener("paste", (event) => {
   if (STATE.role !== "laptop") return;

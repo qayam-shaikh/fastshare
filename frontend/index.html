@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=5">
   <title>__PAGE_TITLE__</title>
+  <meta name="theme-color" content="#0b0f19">
+  <link rel="manifest" href="__MANIFEST_URL__">
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -49,7 +51,6 @@
           <svg id="themeIconSun" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" style="display:none"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
           <svg id="themeIconMoon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
         </button>
-
         <button type="button" class="btn btn-danger-soft btn-sm" id="stopAppBtn" style="display:none" onclick="openStopModal()">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
           <span>Stop Session</span>
@@ -234,16 +235,30 @@
         <div class="upload-progress" id="uploadProgressWrap">
           <div class="progress-meta">
             <span id="uploadProgressLabel">Uploading…</span>
-            <span id="uploadProgressPct">0%</span>
+            <span id="uploadProgressDetails">0%</span>
           </div>
           <div class="progress-track">
             <div class="progress-fill" id="uploadProgressBar"></div>
           </div>
         </div>
+        <p class="storage-info" id="storageInfo"></p>
       </section>
 
       <!-- RIGHT COLUMN: Compact Connection Banner + Shared Session Feed -->
       <div class="right-bento-stack">
+        <section class="bento-card install-app-card" id="installAppPanel" hidden>
+          <div class="install-app-copy">
+            <div class="section-icon indigo" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M5 14v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5"/></svg>
+            </div>
+            <div>
+              <h2 class="card-title">Install QuickShare</h2>
+              <p class="card-subtitle">Add it to your home screen for quicker access.</p>
+            </div>
+          </div>
+          <button type="button" class="btn btn-outline btn-sm" id="installAppBtn" onclick="installQuickShare()">Install App</button>
+        </section>
+
         <!-- Compact Horizontal Phone Connect Card (Laptop Only) -->
         <section class="bento-card qr-banner-card" id="qrPanel" style="display:none">
           <div class="qr-banner-layout">
@@ -278,6 +293,11 @@
 
         <!-- Shared Session Feed Card -->
         <section class="bento-card feed-hub-card">
+          <div class="session-view-tabs" role="tablist" aria-label="Session views">
+            <button type="button" class="seg-tab active" id="feedViewTab" role="tab" aria-selected="true" onclick="setSessionView('feed')">Shared Files</button>
+            <button type="button" class="seg-tab" id="scratchpadViewTab" role="tab" aria-selected="false" onclick="setSessionView('scratchpad')">Live Scratchpad</button>
+          </div>
+          <div id="feedViewPanel" role="tabpanel">
           <div class="feed-header">
             <div class="card-title-group">
               <div class="section-icon emerald">
@@ -313,6 +333,17 @@
           </div>
 
           <div id="itemsContainer" class="feed-items-list"></div>
+          </div>
+          <section class="scratchpad-panel" id="scratchpadViewPanel" role="tabpanel" hidden>
+            <div class="scratchpad-header">
+              <div>
+                <h3 class="card-title">Live Shared Scratchpad</h3>
+                <p class="card-subtitle">Text syncs between your devices as you type.</p>
+              </div>
+              <span class="scratchpad-status" id="scratchpadStatus" aria-live="polite">Connected</span>
+            </div>
+            <textarea id="scratchpadInput" class="scratchpad-input" placeholder="Start typing on either device…" spellcheck="false"></textarea>
+          </section>
         </section>
       </div>
     </main>
@@ -324,6 +355,18 @@
       <img id="lightboxImg" src="" alt="Full size preview">
       <button type="button" class="lightbox-close" onclick="closeLightbox()" aria-label="Close preview">✕</button>
     </div>
+  </div>
+
+  <div class="modal-backdrop" id="filePreviewModal" onclick="closeFilePreview()">
+    <section class="file-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="filePreviewTitle" onclick="event.stopPropagation()">
+      <header class="file-preview-header">
+        <h2 class="file-preview-title" id="filePreviewTitle"></h2>
+        <button type="button" class="btn btn-icon" onclick="closeFilePreview()" aria-label="Close preview">✕</button>
+      </header>
+      <p class="file-preview-status" id="filePreviewStatus" role="status">Loading preview…</p>
+      <iframe class="file-preview-pdf" id="filePreviewPdf" title="PDF preview" hidden></iframe>
+      <pre class="file-preview-code" id="filePreviewCode" hidden></pre>
+    </section>
   </div>
 
   <!-- Stop Session Confirmation Modal (Sandbox-safe, replaces native confirm) -->
@@ -345,5 +388,10 @@
     window.__INITIAL_STATE__ = __INITIAL_STATE_JSON__;
   </script>
   <script src="/static/app.js"></script>
+  <script>
+    if ("serviceWorker" in navigator && window.isSecureContext) {
+      navigator.serviceWorker.register("/service-worker.js").catch(error => console.error("QuickShare service worker registration failed:", error));
+    }
+  </script>
 </body>
 </html>

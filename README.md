@@ -24,6 +24,44 @@ Shared text snippets automatically linkify web URLs, email addresses, and phone 
 
 When at least two items have been received on a device, use **Download All (ZIP)** above the session feed to download them as one archive.
 
+## Preview documents and code
+
+Click a `.pdf`, `.md`, `.json`, or `.py` item in the session feed to preview it in a modal without downloading it. Text and code previews are displayed as plain text.
+
+## Live scratchpad and media previews
+
+Use the **Live Scratchpad** tab to draft or paste text on either device; changes sync to the other device while the session is open. Received `.mp4`, `.webm`, `.mp3`, and `.wav` files have inline playback controls and still retain their download action.
+
+## Send files directly from the terminal
+
+Pass one or more files or folders when launching QuickShare:
+
+```sh
+./quickshare send ~/Pictures/photo.png ~/Documents
+```
+
+Files are pre-shared in the feed, and folders are packed into ZIP files. You can also pass paths without the `send` word.
+
+## Save received files to the laptop
+
+On the Laptop Hub, use **Save to Inbox** on a received item to copy it directly into `~/QuickShare-Inbox` on the laptop, without downloading it through the browser.
+
+## Optional phone PIN and upload capacity
+
+Start QuickShare with `--pin 1234` to require that four-digit PIN when a phone first opens the session. The browser remembers authorization for that session. Uploads show live transfer speed/ETA and available laptop disk space; requests are rejected if the upload limit or available storage would be exceeded.
+
+## Install QuickShare on a phone
+
+The phone page provides installable-app icons, an Android share target for photos, video, audio, PDFs, links, and text, and an **Install App** button. Android browsers may show the install prompt or require choosing **Install app / Add to Home screen** from the browser menu. On iPhone or iPad, open the page in Safari, tap **Share**, then choose **Add to Home Screen**.
+
+Mobile browsers require a **trusted HTTPS origin** for PWA installation, service workers, and native share targets. QuickShare's default HTTP mode cannot provide those browser features; enable HTTPS with a certificate trusted by the phone:
+
+```sh
+./quickshare --tls-cert /path/to/quickshare.crt --tls-key /path/to/quickshare.key
+```
+
+The certificate must be valid for the QuickShare `.local` hostname, and its issuing CA must be trusted by both devices. A self-signed certificate that has not been trusted will trigger browser warnings and will not enable PWA/share-target support. The **Install App** button explains the browser-specific next steps when an in-page install prompt is unavailable.
+
 ## Project Structure
 
 ```text

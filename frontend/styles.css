@@ -603,6 +603,28 @@ button,
   width: 100%;
 }
 
+.install-app-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.install-app-card[hidden] {
+  display: none;
+}
+
+.install-app-copy {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.install-app-copy .card-subtitle {
+  margin-bottom: 0;
+}
+
 .bento-card {
   width: 100%;
   min-width: 0;
@@ -828,6 +850,12 @@ button,
   transition: width 0.1s linear;
 }
 
+.storage-info {
+  margin: 8px 0 0;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
 /* =========================================================
    COMPACT HORIZONTAL QR BANNER (Right Column Top)
    ========================================================= */
@@ -978,6 +1006,59 @@ button,
   display: none;
 }
 
+.session-view-tabs {
+  display: flex;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  margin-bottom: 14px;
+  padding: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+}
+
+.scratchpad-panel {
+  min-height: 320px;
+}
+
+.scratchpad-panel[hidden],
+#feedViewPanel[hidden] {
+  display: none;
+}
+
+.scratchpad-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.scratchpad-status {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.scratchpad-input {
+  display: block;
+  width: 100%;
+  min-height: 300px;
+  padding: 14px;
+  resize: vertical;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  color: var(--text-main);
+  font: 0.9rem/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.scratchpad-input:focus {
+  outline: 2px solid var(--indigo-600);
+  outline-offset: 1px;
+}
+
 .seg-tab.active .tab-count {
   background: var(--indigo-soft);
   color: var(--indigo-600);
@@ -1013,6 +1094,14 @@ button,
 
 .transfer-card.outgoing {
   border-left: 4px solid var(--emerald-600);
+}
+
+.transfer-card.previewable {
+  cursor: pointer;
+}
+
+.transfer-card.previewable:hover {
+  border-color: var(--indigo-border);
 }
 
 .transfer-top {
@@ -1142,6 +1231,25 @@ button,
   margin: 0 auto;
 }
 
+.media-stage {
+  overflow: hidden;
+  padding: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: #000;
+}
+
+.media-stage video,
+.media-stage audio {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+}
+
+.media-stage audio {
+  background: var(--bg-card);
+}
+
 .transfer-actions {
   display: flex;
   align-items: center;
@@ -1196,6 +1304,64 @@ button,
   border: 2px solid #ffffff;
   font-size: 0.9rem;
   padding: 0;
+}
+
+.file-preview-dialog {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(100%, 960px);
+  height: min(88vh, 900px);
+  overflow: hidden;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-hover);
+}
+
+.file-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.file-preview-title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: 0.95rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-preview-status {
+  margin: auto;
+  padding: 20px;
+  color: var(--text-secondary);
+}
+
+.file-preview-pdf {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: #ffffff;
+}
+
+.file-preview-code {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 18px;
+  color: var(--text-main);
+  background: var(--bg-subtle);
+  font: 0.84rem/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .confirm-dialog {
@@ -1288,6 +1454,18 @@ button,
 
   .topbar-controls {
     justify-content: space-between;
+    width: 100%;
+  }
+
+  .install-app-card {
+    flex-wrap: wrap;
+  }
+
+  .install-app-copy {
+    flex: 1 1 100%;
+  }
+
+  .install-app-card .btn {
     width: 100%;
   }
 
